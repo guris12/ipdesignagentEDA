@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+
+# Environment
+.env
+.env.local
+
+# IDE / tool config
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (large downloaded docs — regenerate via etl.py)
+data/docs/
+data/logs/
+
+# Docker
+.docker/
+
+# Test
+.pytest_cache/
+htmlcov/
+.coverage

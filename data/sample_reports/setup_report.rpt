@@ -1,0 +1,96 @@
+Startpoint: input_reg/CK (rising edge-triggered flip-flop clocked by clk)
+Endpoint: output_reg/D (rising edge-triggered flip-flop clocked by clk)
+Path Group: clk
+Path Type: max
+
+  Delay    Time   Description
+---------------------------------------------------------
+   0.00    0.00   clock clk (rise edge)
+   0.05    0.05   clock network delay (ideal)
+   0.00    0.05 ^ input_reg/CK (CK)
+   0.12    0.17 v input_reg/Q (Q)
+   0.08    0.25 v u_buf1/Y (BUF_X2)
+   0.15    0.40 v u_add/CO (FA_X1)
+   0.11    0.51 ^ u_inv/Y (INV_X1)
+   0.09    0.60 ^ u_buf2/Y (BUF_X4)
+   0.07    0.67 ^ output_reg/D (D)
+           0.67   data arrival time
+
+   1.00    1.00   clock clk (rise edge)
+   0.05    1.05   clock network delay (ideal)
+  -0.10    0.95   clock uncertainty
+   0.00    0.95   clock reconvergence pessimism
+  -0.05    0.90   library setup time
+           0.90   data required time
+---------------------------------------------------------
+           0.90   data required time
+          -0.67   data arrival time
+---------------------------------------------------------
+           0.23   slack (MET)
+
+
+----------------------------------------
+
+Startpoint: data_in_reg[3]/CK (rising edge-triggered flip-flop clocked by clk)
+Endpoint: alu_out_reg[7]/D (rising edge-triggered flip-flop clocked by clk)
+Path Group: clk
+Path Type: max
+
+  Delay    Time   Description
+---------------------------------------------------------
+   0.00    0.00   clock clk (rise edge)
+   0.05    0.05   clock network delay (ideal)
+   0.00    0.05 ^ data_in_reg[3]/CK (CK)
+   0.14    0.19 v data_in_reg[3]/Q (Q)
+   0.22    0.41 v u_alu/add_stage1/CO (FA_X1)
+   0.18    0.59 ^ u_alu/add_stage2/S (FA_X1)
+   0.15    0.74 v u_alu/mux_sel/Y (MUX2_X1)
+   0.12    0.86 ^ u_alu/buf_out/Y (BUF_X1)
+   0.09    0.95 ^ alu_out_reg[7]/D (D)
+           0.95   data arrival time
+
+   1.00    1.00   clock clk (rise edge)
+   0.05    1.05   clock network delay (ideal)
+  -0.10    0.95   clock uncertainty
+   0.00    0.95   clock reconvergence pessimism
+  -0.05    0.90   library setup time
+           0.90   data required time
+---------------------------------------------------------
+           0.90   data required time
+          -0.95   data arrival time
+---------------------------------------------------------
+          -0.05   slack (VIOLATED)
+
+
+----------------------------------------
+
+Startpoint: ctrl_reg/CK (rising edge-triggered flip-flop clocked by clk)
+Endpoint: fsm_state_reg[2]/D (rising edge-triggered flip-flop clocked by clk)
+Path Group: clk
+Path Type: max
+
+  Delay    Time   Description
+---------------------------------------------------------
+   0.00    0.00   clock clk (rise edge)
+   0.05    0.05   clock network delay (ideal)
+   0.00    0.05 ^ ctrl_reg/CK (CK)
+   0.11    0.16 v ctrl_reg/Q (Q)
+   0.25    0.41 v u_fsm/decode_logic/Y (AOI22_X2)
+   0.19    0.60 ^ u_fsm/state_mux/Y (MUX4_X1)
+   0.22    0.82 v u_fsm/next_state_buf/Y (BUF_X1)
+   0.14    0.96 ^ u_fsm/output_inv/Y (INV_X2)
+   0.08    1.04 ^ fsm_state_reg[2]/D (D)
+           1.04   data arrival time
+
+   1.00    1.00   clock clk (rise edge)
+   0.05    1.05   clock network delay (ideal)
+  -0.10    0.95   clock uncertainty
+   0.00    0.95   clock reconvergence pessimism
+  -0.05    0.90   library setup time
+           0.90   data required time
+---------------------------------------------------------
+           0.90   data required time
+          -1.04   data arrival time
+---------------------------------------------------------
+          -0.14   slack (VIOLATED)
+

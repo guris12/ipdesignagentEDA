@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Timing Closure Dashboard: gcd (sky130hd)</title>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    padding: 20px;
+    color: #333;
+}
+.container { max-width: 1400px; margin: 0 auto; }
+.header {
+    background: white;
+    padding: 24px;
+    border-radius: 12px;
+    margin-bottom: 20px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+}
+.header h1 { font-size: 28px; color: #2d3748; margin-bottom: 8px; }
+.header .meta { color: #718096; font-size: 14px; }
+.cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 16px;
+    margin-bottom: 20px;
+}
+.card {
+    background: white;
+    padding: 20px;
+    border-radius: 12px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+}
+.card-title {
+    font-size: 14px;
+    color: #718096;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+}
+.card-value {
+    font-size: 32px;
+    font-weight: 700;
+    color: #2d3748;
+    margin-bottom: 4px;
+}
+.card-value.pass { color: #38a169; }
+.card-value.fail { color: #e53e3e; }
+.card-delta { font-size: 14px; font-weight: 600; }
+.delta-positive { color: #38a169; }
+.delta-negative { color: #e53e3e; }
+.delta-neutral { color: #718096; }
+.chart-container {
+    background: white;
+    padding: 24px;
+    border-radius: 12px;
+    margin-bottom: 20px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+}
+.chart-title {
+    font-size: 18px;
+    font-weight: 600;
+    color: #2d3748;
+    margin-bottom: 16px;
+}
+table {
+    width: 100%;
+    background: white;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    border-collapse: collapse;
+}
+th {
+    background: #4a5568;
+    color: white;
+    padding: 12px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 14px;
+}
+td {
+    padding: 12px;
+    border-bottom: 1px solid #e2e8f0;
+    font-size: 14px;
+}
+tr:last-child td { border-bottom: none; }
+tr:hover { background: #f7fafc; }
+.status-badge {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+.badge-pass { background: #c6f6d5; color: #22543d; }
+.badge-fail { background: #fed7d7; color: #742a2a; }
+.eco-description { font-size: 12px; color: #718096; font-style: italic; }
+.convergence {
+    display: inline-block;
+    margin-left: 12px;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    background: #bee3f8;
+    color: #2c5282;
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+<div class="header">
+    <h1>Timing Closure Dashboard: gcd (sky130hd)</h1>
+    <div class="meta">
+        Generated: 2026-04-13 14:37:46 |
+        Runs: 3 |
+        Baseline: baseline |
+        Latest: eco2
+        <span class="convergence">CONVERGING</span>
+    </div>
+</div>
+
+<div class="cards">
+    <div class="card">
+        <div class="card-title">Current WNS</div>
+        <div class="card-value pass">
+            +0.080 ns
+        </div>
+        <div class="card-delta delta-positive">
+            +0.600 ns from baseline
+        </div>
+    </div>
+    <div class="card">
+        <div class="card-title">Violations</div>
+        <div class="card-value pass">
+            0
+        </div>
+        <div class="card-delta delta-positive">
+            -8 from baseline
+        </div>
+    </div>
+    <div class="card">
+        <div class="card-title">DRC Issues</div>
+        <div class="card-value">
+            5
+        </div>
+        <div class="card-delta delta-neutral">
+            ±0 from baseline
+        </div>
+    </div>
+    <div class="card">
+        <div class="card-title">Area</div>
+        <div class="card-value">
+            9456 µm²
+        </div>
+        <div class="card-delta delta-neutral">
+            +5.6% from baseline
+        </div>
+    </div>
+</div>
+
+<div class="chart-container">
+    <div class="chart-title">WNS Trend Over Runs</div>
+    <div id="wns-chart"></div>
+</div>
+
+<div class="chart-container">
+    <div class="chart-title">Violations by Run</div>
+    <div id="violations-chart"></div>
+</div>
+
+<div class="chart-container">
+    <div class="chart-title">Detailed Run Comparison</div>
+    <table>
+        <thead>
+            <tr>
+                <th>Run ID</th>
+                <th>WNS (ns)</th>
+                <th>TNS (ns)</th>
+                <th>Violations</th>
+                <th>DRC</th>
+                <th>Cells</th>
+                <th>Area (µm²)</th>
+                <th>Status</th>
+                <th>ECO Applied</th>
+            </tr>
+        </thead>
+        <tbody>
+
+            <tr>
+                <td><strong>baseline</strong></td>
+                <td>-0.520</td>
+                <td>-2.140</td>
+                <td>8</td>
+                <td>5</td>
+                <td>1247</td>
+                <td>8956</td>
+                <td><span class="status-badge badge-fail">⚠️ FAIL</span></td>
+                <td>—</td>
+            </tr>
+
+            <tr>
+                <td><strong>eco1</strong></td>
+                <td>-0.140</td>
+                <td>-0.870</td>
+                <td>3</td>
+                <td>5</td>
+                <td>1289</td>
+                <td>9123</td>
+                <td><span class="status-badge badge-fail">⚠️ FAIL</span></td>
+                <td>cell_sizing<br><span class='eco-description'>Upsized 4 critical cells in ALU datapath</span></td>
+            </tr>
+
+            <tr>
+                <td><strong>eco2</strong></td>
+                <td>+0.080</td>
+                <td>+0.000</td>
+                <td>0</td>
+                <td>5</td>
+                <td>1305</td>
+                <td>9456</td>
+                <td><span class="status-badge badge-pass">✅ PASS</span></td>
+                <td>buffer_insertion<br><span class='eco-description'>Buffered 2 long nets with high RC delay</span></td>
+            </tr>
+
+        </tbody>
+    </table>
+</div>
+
+</div>
+
+<script>
+// WNS Trend Chart
+var wnsTrace = {
+    x: ["baseline", "eco1", "eco2"],
+    y: [-0.52, -0.14, 0.08],
+    type: 'scatter',
+    mode: 'lines+markers',
+    name: 'WNS',
+    line: { color: '#667eea', width: 3 },
+    marker: { size: 10, color: ["#e53e3e", "#e53e3e", "#38a169"] }
+};
+
+var zeroLine = {
+    x: ["baseline", "eco1", "eco2"],
+    y: [0, 0, 0],
+    type: 'scatter',
+    mode: 'lines',
+    name: 'Target (0 ns)',
+    line: { color: '#38a169', width: 2, dash: 'dash' },
+    showlegend: true
+};
+
+var wnsLayout = {
+    xaxis: { title: 'Run', showgrid: true },
+    yaxis: { title: 'WNS (ns)', showgrid: true, zeroline: true },
+    hovermode: 'closest',
+    plot_bgcolor: '#f7fafc',
+    paper_bgcolor: '#ffffff',
+    margin: {t: 20, r: 20, b: 60, l: 60}
+};
+
+Plotly.newPlot('wns-chart', [wnsTrace, zeroLine], wnsLayout, {responsive: true});
+
+// Violations Chart
+var violTrace = {
+    x: ["baseline", "eco1", "eco2"],
+    y: [8, 3, 0],
+    type: 'bar',
+    marker: { color: ["#e53e3e", "#e53e3e", "#38a169"] }
+};
+
+var violLayout = {
+    xaxis: { title: 'Run' },
+    yaxis: { title: 'Violation Count', showgrid: true },
+    plot_bgcolor: '#f7fafc',
+    paper_bgcolor: '#ffffff',
+    margin: {t: 20, r: 20, b: 60, l: 60}
+};
+
+Plotly.newPlot('violations-chart', [violTrace], violLayout, {responsive: true});
+</script>
+
+</body>
+</html>

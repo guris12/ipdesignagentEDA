@@ -1,0 +1,1 @@
+import ip_agent._db  # noqa: F401 — patches SQLAlchemy before any PGVector import

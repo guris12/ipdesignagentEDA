@@ -1,0 +1,42 @@
+======================================================================
+  Cell Usage Report — block_alu
+  Design: gcd_top
+  Tool: OpenROAD
+======================================================================
+
+Cell Type         Count   Area(um2)   Leakage(nW)
+----------------------------------------------------------------------
+BUF_X1              45      22.5        4.50
+BUF_X2              32      32.0        6.40
+BUF_X4              18      36.0        7.20
+INV_X1              67      16.75       3.35
+INV_X2              23      11.5        2.30
+NAND2_X1            89      22.25       4.45
+NOR2_X1             56      14.0        2.80
+AOI22_X1            12       9.6        1.92
+AOI22_X2            8       12.8        2.56
+FA_X1               24      48.0        9.60
+MUX2_X1             16      19.2        3.84
+MUX4_X1              4       9.6        1.92
+DFFX1               38      76.0       15.20
+DFFX2               12      36.0        7.20
+CLKBUF_X1           8       4.0         0.80
+CLKBUF_X2           6       6.0         1.20
+CLKBUF_X4           4       8.0         1.60
+----------------------------------------------------------------------
+TOTAL              462     384.2       76.84
+
+Utilization: 67.3%
+Design Area: 571.0 um2
+
+----------------------------------------------------------------------
+Cells on Critical Paths:
+  u_alu/add_stage1   FA_X1    (setup slack: -0.05ns) → candidate for upsizing
+  u_alu/add_stage2   FA_X1    (setup slack: -0.05ns) → candidate for upsizing
+  u_alu/mux_sel      MUX2_X1  (setup slack: -0.05ns) → candidate for upsizing
+  u_alu/buf_out      BUF_X1   (setup slack: -0.05ns) → candidate for BUF_X4
+  u_fsm/decode_logic AOI22_X2 (setup slack: -0.14ns) → candidate for upsizing
+  u_fsm/state_mux    MUX4_X1  (setup slack: -0.14ns) → candidate for upsizing
+  u_fsm/next_state_buf BUF_X1 (setup slack: -0.14ns) → candidate for BUF_X2
+
+======================================================================

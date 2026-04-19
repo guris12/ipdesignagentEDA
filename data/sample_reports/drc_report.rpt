@@ -1,0 +1,63 @@
+======================================================================
+  DRC Violation Report — block_alu
+  Design: gcd_top
+  Tool: OpenROAD DRC (TritonRoute)
+======================================================================
+
+Violation Type: Metal1 Minimum Spacing
+  Location: (145.23, 267.89) to (145.23, 268.12)
+  Net1: u_alu/carry_out
+  Net2: u_alu/sum[3]
+  Required: 0.14um
+  Actual: 0.11um
+  Severity: ERROR
+
+----------------------------------------------------------------------
+
+Violation Type: Metal2 Minimum Width
+  Location: (302.45, 156.78)
+  Net: u_fsm/state_mux/Y
+  Required: 0.16um
+  Actual: 0.13um
+  Severity: ERROR
+
+----------------------------------------------------------------------
+
+Violation Type: Via1 Enclosure
+  Location: (289.10, 201.34)
+  Net: u_alu/buf_out/Y
+  Required: 0.05um overlap
+  Actual: 0.03um overlap
+  Severity: WARNING
+
+----------------------------------------------------------------------
+
+Violation Type: Metal1 Minimum Spacing
+  Location: (147.01, 268.45) to (147.01, 268.72)
+  Net1: u_alu/add_stage2/CO
+  Net2: u_alu/mux_sel/A
+  Required: 0.14um
+  Actual: 0.09um
+  Severity: ERROR
+
+----------------------------------------------------------------------
+
+Violation Type: Metal3 Short
+  Location: (410.22, 89.56)
+  Net1: clk_buf_tree/out[4]
+  Net2: u_core/data_bus[12]
+  Required: No overlap
+  Actual: 0.02um overlap
+  Severity: CRITICAL
+
+----------------------------------------------------------------------
+
+Summary:
+  Total violations: 5
+  CRITICAL: 1
+  ERROR: 3
+  WARNING: 1
+  Affected nets: 7
+  Affected region: (145, 156) to (410, 268)
+
+======================================================================
