@@ -9,13 +9,11 @@ and models are called for every query.
 """
 
 import asyncio
-import nest_asyncio
+import concurrent.futures
 import time
 import logging
 import io
 import streamlit as st
-
-nest_asyncio.apply()
 
 st.set_page_config(
     page_title="IP Design Intelligence Agent",
@@ -70,9 +68,9 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 
 def run_async(coro):
-    """Run an async coroutine safely inside Streamlit."""
-    loop = asyncio.get_event_loop()
-    return loop.run_until_complete(coro)
+    """Run an async coroutine safely inside Streamlit (which uses uvloop)."""
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        return pool.submit(asyncio.run, coro).result()
 
 
 # ---------------------------------------------------------------------------
