@@ -9,10 +9,13 @@ and models are called for every query.
 """
 
 import asyncio
+import nest_asyncio
 import time
 import logging
 import io
 import streamlit as st
+
+nest_asyncio.apply()
 
 st.set_page_config(
     page_title="IP Design Intelligence Agent",
@@ -60,6 +63,16 @@ with st.sidebar:
     - Cost routing (gpt-4o-mini / gpt-4o)
     - Guardrails (hallucination check)
     """)
+
+
+# ---------------------------------------------------------------------------
+# Async helper — safe for Streamlit's event loop
+# ---------------------------------------------------------------------------
+
+def run_async(coro):
+    """Run an async coroutine safely inside Streamlit."""
+    loop = asyncio.get_event_loop()
+    return loop.run_until_complete(coro)
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +156,7 @@ def run_agent_with_trace(query: str, chat_history: list[dict] | None = None) -> 
     # Step 4: Run agent
     t_agent = time.time()
     from ip_agent.agent import ask
-    answer = asyncio.run(ask(query, chat_history=chat_history))
+    answer = run_async(ask(query, chat_history=chat_history))
     agent_time = time.time() - t_agent
 
     for lgr in loggers:
@@ -222,13 +235,13 @@ def run_agent_with_trace(query: str, chat_history: list[dict] | None = None) -> 
 # Render a collapsible trace block
 # ---------------------------------------------------------------------------
 
-def render_trace(trace: dict, query: str, index: int):
+def render_trace(trace: dict, query: str, index: int, is_latest: bool = False):
     """Render a collapsible execution trace for a single query."""
     summary = (
-        f"Query #{index+1}: **{trace['route']}** → {trace['model']} "
+        f"Trace #{index+1}: {trace['route']} | {trace['model']} "
         f"| {trace['total_time']:.0f}ms | Guardrail {trace['guardrail_score']:.1f}"
     )
-    with st.expander(summary, expanded=(index == len(st.session_state.messages) // 2 - 1)):
+    with st.expander(summary, expanded=is_latest):
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Route", trace["route"])
         c2.metric("Model", trace["model"])
@@ -254,18 +267,30 @@ def render_trace(trace: dict, query: str, index: int):
 # Main Chat Area
 # ---------------------------------------------------------------------------
 
-# Display chat history
+# Count assistant messages to know which is latest
+assistant_count = sum(1 for m in st.session_state.messages if m["role"] == "assistant")
+current_assistant = 0
+
+# Display chat history with traces inline
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
     if message["role"] == "assistant" and "trace" in message:
-        render_trace(message["trace"], message.get("query", ""), message.get("index", 0))
+        current_assistant += 1
+        render_trace(
+            message["trace"],
+            message.get("query", ""),
+            message.get("index", 0),
+            is_latest=(current_assistant == assistant_count),
+        )
 
-# Chat input — always visible at bottom
-prompt = st.session_state.get("pending_question") or st.chat_input(
-    "Ask about EDA, timing, OpenROAD/OpenSTA..."
-)
-st.session_state.pending_question = None
+# Chat input — always at bottom
+prompt = st.chat_input("Ask about EDA, timing, OpenROAD/OpenSTA...")
+
+# Handle sidebar button clicks
+if st.session_state.pending_question:
+    prompt = st.session_state.pending_question
+    st.session_state.pending_question = None
 
 if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -283,7 +308,7 @@ if prompt:
                 answer, trace = run_agent_with_trace(prompt, chat_history=chat_history)
                 st.markdown(answer)
 
-                msg_index = len(st.session_state.messages) // 2
+                msg_index = len([m for m in st.session_state.messages if m["role"] == "assistant"])
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": answer,
@@ -302,7 +327,7 @@ if prompt:
                     "content": error_msg,
                 })
 
-    # Render the trace right after the answer
+    # Show trace for the just-generated answer
     if st.session_state.messages and "trace" in st.session_state.messages[-1]:
         last = st.session_state.messages[-1]
-        render_trace(last["trace"], last.get("query", ""), last.get("index", 0))
+        render_trace(last["trace"], last.get("query", ""), last.get("index", 0), is_latest=True)
