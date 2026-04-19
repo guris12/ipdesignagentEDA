@@ -546,6 +546,237 @@ down to 2-3. The 2-8 hours of human analysis between STA runs → 30 seconds.
 
 ---
 
+## Phase 2 — Live OpenROAD Flow + Agent on AWS (Interview Killer Demo)
+
+**Status:** PLANNED — build when invited for interview, or before May 6 apply date
+**Estimated effort:** 8-12 hours
+**Monthly AWS cost:** ~$60-80/month (run only for interview week, then tear down)
+
+### The Goal
+
+Two live services on AWS, talking to each other:
+
+```
+┌─────────────────────────────────┐       ┌──────────────────────────────────┐
+│  ECS Task 1: OpenROAD Runner    │       │  ECS Task 2: ip-design-agent     │
+│                                 │       │                                  │
+│  - OpenROAD-flow-scripts        │  EFS  │  - FastAPI + Streamlit           │
+│  - sky130 PDK                   │──────→│  - Reads .rpt from shared volume │
+│  - Runs synthesis → P&R → STA   │volume │  - MCP tools ingest new reports  │
+│  - Dumps .rpt to /data/reports/ │       │  - Agent analyzes violations     │
+│  - Receives fix_timing.tcl back │←──────│  - Generates ECO Tcl script      │
+│                                 │       │  - Feeds ECO back for re-run     │
+└─────────────────────────────────┘       └──────────────────────────────────┘
+         ↑                                          ↑
+    c6g.xlarge (4 vCPU, 8GB)                 c6g.large (2 vCPU, 4GB)
+    Spot instance (~$0.04/hr)                On-demand (~$0.07/hr)
+```
+
+**Live demo flow:**
+1. Open Streamlit UI at `https://agent.yourdomain.com`
+2. Click "Run OpenROAD Flow" on `gcd` design with sky130 PDK
+3. OpenROAD container runs synthesis → floorplan → place → CTS → route → STA (~3 min)
+4. Real `.rpt` files land on shared EFS volume
+5. Agent auto-ingests reports, analyzes real violations
+6. 3-agent orchestrator generates DRC-aware ECO script
+7. ECO fed back to OpenROAD container → re-run STA → show improvement
+8. Interactive dashboard shows WNS/TNS trending across iterations
+
+### Architecture — AWS Infrastructure (Terraform)
+
+```
+eu-west-1 (Dublin)
+├── VPC + Subnets (existing from Phase 1)
+├── ECS Cluster
+│   ├── Service: openroad-runner (Fargate Spot, c6g.xlarge)
+│   │   └── Docker: openroad/flow-ubuntu22.04-builder + sky130
+│   ├── Service: ip-design-agent (Fargate, c6g.large)
+│   │   └── Docker: ip-design-agent (existing Dockerfile)
+│   └── Service: streamlit-ui (Fargate, t4g.small)
+│       └── Docker: ip-design-agent (streamlit command)
+├── RDS PostgreSQL 16 + pgvector (existing from Phase 1)
+├── EFS (Elastic File System) — shared volume for .rpt files
+│   └── /data/reports/ — OpenROAD writes, Agent reads
+├── ALB (Application Load Balancer)
+│   ├── agent.yourdomain.com → ip-design-agent:8001
+│   └── ui.yourdomain.com → streamlit:8501
+├── S3 + CloudFront (existing — dashboards)
+└── CloudWatch — logs, metrics, alarms
+```
+
+### New Terraform Files Needed
+
+```
+terraform/
+├── ... (existing 13 files)
+├── efs.tf                    # EFS file system + mount targets + access points
+├── ecs_openroad.tf           # OpenROAD runner ECS task + service (Fargate Spot)
+├── ecr_openroad.tf           # ECR repo for OpenROAD Docker image
+└── ecs_agent_updated.tf      # Update agent task to mount EFS volume
+```
+
+### Docker Images
+
+**Image 1: OpenROAD Runner** (~3-4 GB)
+```dockerfile
+# Dockerfile.openroad
+FROM openroad/flow-ubuntu22.04-builder:latest
+
+# sky130 PDK is included in OpenROAD-flow-scripts
+RUN git clone --depth 1 https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts.git /flow
+WORKDIR /flow
+
+# Pre-download sky130 PDK (avoids runtime download)
+RUN make DESIGN_CONFIG=designs/sky130hd/gcd/config.mk synth || true
+
+# Shared volume mount point
+VOLUME /data/reports
+
+# Entry point: run a design and dump reports
+COPY run_flow.sh /run_flow.sh
+RUN chmod +x /run_flow.sh
+ENTRYPOINT ["/run_flow.sh"]
+CMD ["gcd", "sky130hd"]
+```
+
+**run_flow.sh** (entry point script):
+```bash
+#!/bin/bash
+DESIGN=${1:-gcd}
+PDK=${2:-sky130hd}
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+OUTPUT_DIR=/data/reports/${DESIGN}_${PDK}_${TIMESTAMP}
+
+echo "=== Running OpenROAD flow: ${DESIGN} / ${PDK} ==="
+cd /flow
+
+# Run full flow: synth → floorplan → place → CTS → route → STA
+make DESIGN_CONFIG=designs/${PDK}/${DESIGN}/config.mk
+
+# Copy reports to shared volume
+mkdir -p ${OUTPUT_DIR}
+cp -r results/${PDK}/${DESIGN}/base/*.rpt ${OUTPUT_DIR}/ 2>/dev/null || true
+cp -r logs/${PDK}/${DESIGN}/base/*.log ${OUTPUT_DIR}/ 2>/dev/null || true
+
+# Signal completion
+echo "DONE" > ${OUTPUT_DIR}/.complete
+echo "=== Reports written to ${OUTPUT_DIR} ==="
+ls -la ${OUTPUT_DIR}/
+```
+
+**Image 2: ip-design-agent** (existing, needs EFS mount + production mode)
+- Already have `Dockerfile` — just add EFS volume mount in ECS task definition
+- Switch `eda_bridge.py` from `demo_mode=True` to `demo_mode=False`
+- Add file watcher in `openroad_tools.py` to detect new `.rpt` files on EFS
+
+### Sample Designs Available (OpenROAD-flow-scripts)
+
+| Design | Cells | Runtime (M-series) | Runtime (c6g.xlarge) | Use Case |
+|--------|-------|--------------------|-----------------------|----------|
+| `gcd` | ~400 | ~2-3 min | ~3-4 min | Quick demo (GCD algorithm) |
+| `ibex` | ~15K | ~8-10 min | ~12-15 min | RISC-V core (impressive) |
+| `aes_cipher` | ~20K | ~10-15 min | ~15-20 min | Crypto block |
+| `jpeg` | ~40K | ~20-30 min | ~25-35 min | Large design (show scale) |
+
+**Recommended for demo:** `gcd` (fast) + `ibex` (impressive RISC-V core)
+
+### AWS Cost Estimate
+
+| Resource | Spec | $/hr | $/month (24/7) | Interview week only |
+|----------|------|------|----------------|---------------------|
+| OpenROAD Runner | c6g.xlarge Spot | ~$0.04 | ~$29 | ~$7 (run on demand) |
+| ip-design-agent | c6g.large | ~$0.07 | ~$50 | ~$12 |
+| Streamlit UI | t4g.small | ~$0.02 | ~$14 | ~$3 |
+| RDS PostgreSQL | db.t4g.micro | ~$0.02 | ~$14 | ~$3 |
+| EFS | 1 GB | — | ~$0.30 | ~$0.10 |
+| ALB | — | ~$0.02 | ~$16 | ~$4 |
+| S3 + CloudFront | dashboards | — | ~$1 | ~$0.25 |
+| **Total** | | | **~$125/month** | **~$30 for 1 week** |
+
+**Strategy:** Deploy 2-3 days before interview, demo live, tear down after.
+Run `terraform destroy` to avoid ongoing costs.
+
+### Implementation Steps (8-12 hours)
+
+**Step 1: OpenROAD Docker Image (2 hours)**
+- Write `Dockerfile.openroad` based on `openroad/flow-ubuntu22.04-builder`
+- Write `run_flow.sh` entry point
+- Test locally: `docker build -t openroad-runner -f Dockerfile.openroad .`
+- Run: `docker run -v /tmp/reports:/data/reports openroad-runner gcd sky130hd`
+- Verify `.rpt` files in `/tmp/reports/`
+
+**Step 2: Wire Agent to Read Real Reports (2 hours)**
+- Update `openroad_tools.py`: add `watch_reports_dir()` MCP tool
+- Update `eda_bridge.py`: `demo_mode=False` reads from EFS path
+- Update `ingest.py`: add `ingest_from_directory(path)` for live reports
+- Test locally with reports from Step 1
+
+**Step 3: Terraform — EFS + OpenROAD ECS (3 hours)**
+- Write `efs.tf`: file system, mount targets, security group
+- Write `ecs_openroad.tf`: task definition with EFS mount, Fargate Spot
+- Write `ecr_openroad.tf`: ECR repo for OpenROAD image
+- Update existing `ecs.tf`: add EFS mount to agent task
+- Add API endpoint: `POST /run-flow` triggers OpenROAD ECS task
+
+**Step 4: Build + Push + Deploy (2 hours)**
+- Push OpenROAD image to ECR
+- Update agent image with EFS support
+- `terraform apply`
+- Verify both services running
+
+**Step 5: End-to-End Test (1-2 hours)**
+- Hit live URL: `https://agent.yourdomain.com/health`
+- Trigger flow: `POST /run-flow {"design": "gcd", "pdk": "sky130hd"}`
+- Wait 3-4 minutes for OpenROAD to complete
+- Query agent: "What are the timing violations in the latest run?"
+- Agent reads real `.rpt` from EFS, analyzes, returns real violations
+- Run Timing Closure → get real ECO script
+- Feed back → re-run → show improvement on dashboard
+
+### What This Proves in Interview
+
+| They See | What It Proves |
+|----------|---------------|
+| Real OpenROAD flow running on AWS | Can integrate with actual EDA tools at scale |
+| Real timing reports (not sample data) | Agent handles production data |
+| ECO script fed back → re-run → improvement | **Closed-loop automation** — the holy grail |
+| sky130 PDK on RISC-V core (ibex) | Knows open-source EDA ecosystem |
+| Terraform IaC for entire stack | Production deployment, not laptop demo |
+| EFS shared volume between services | Understands distributed systems architecture |
+| Costs ~$30 for interview week | Cost-conscious engineering (Synopsys cares) |
+| `terraform destroy` tears it all down | Clean, reproducible infrastructure |
+
+### Live Demo Script (for interview)
+
+```
+"Let me show you the system running live on AWS..."
+
+1. Open https://ui.yourdomain.com (Streamlit)
+2. "I'll trigger a real OpenROAD flow on the GCD design with sky130 PDK"
+   → Click "Run OpenROAD Flow" → show ECS task starting
+3. "While that runs (~3 min), let me show the agent on existing data"
+   → Chat: "What are the timing violations?" → real answer
+4. "Flow complete — let's see what the real reports show"
+   → Chat: "Analyze the latest OpenROAD run"
+   → Agent reads real .rpt from EFS, shows real WNS/TNS
+5. "Now the 3-agent orchestrator generates DRC-aware fixes"
+   → Timing Closure tab → real ECO script
+6. "Feed the ECO back and re-run — watch the dashboard"
+   → Dashboard shows WNS improving across iterations
+7. "All of this is Terraform — I can tear it down and recreate in 10 minutes"
+   → Show terraform/ecs_openroad.tf
+```
+
+### When to Build
+
+- **NOW:** Document the plan (this section) — DONE
+- **After interview invitation:** Build Steps 1-5 (8-12 hours)
+- **2-3 days before interview:** Deploy to AWS, test live
+- **After interview:** `terraform destroy` — save costs
+- **If no invitation by June 2026:** Build anyway for portfolio (shows initiative)
+
+---
+
 ## Related Files Outside This Directory
 
 | Location | Contents |
