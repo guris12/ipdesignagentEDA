@@ -34,7 +34,7 @@ from ip_agent.config import TOP_K_RESULTS
 
 mcp = FastMCP(
     "IP Design Intelligence",
-    description=(
+    instructions=(
         "EDA knowledge assistant for OpenROAD/OpenSTA. "
         "Search documentation, analyze timing reports, get fix suggestions."
     ),

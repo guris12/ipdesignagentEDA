@@ -316,6 +316,173 @@ cd pgvector && make PG_CONFIG=/opt/homebrew/opt/postgresql@16/bin/pg_config
 make install PG_CONFIG=/opt/homebrew/opt/postgresql@16/bin/pg_config
 ```
 
+### 8. FastMCP constructor API change (FIXED)
+
+**Error:** `TypeError: FastMCP.__init__() got an unexpected keyword argument 'description'`
+
+**Root cause:** `mcp[cli]>=1.0.0` changed `FastMCP.__init__` — the `description` parameter
+was renamed to `instructions`.
+
+**Fix:** Changed `mcp_server.py` from `description=...` to `instructions=...`.
+
+### 9. Streamlit async + uvloop incompatibility (FIXED)
+
+**Error:** `ValueError: Can't patch loop of type <class 'uvloop.Loop'>`
+
+**Root cause:** Streamlit uses uvloop internally. `nest_asyncio` cannot patch uvloop.
+
+**Fix:** Removed `nest_asyncio`. Instead, run async coroutines in a `ThreadPoolExecutor`
+thread with its own `asyncio.run()`:
+```python
+def run_async(coro):
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        return pool.submit(asyncio.run, coro).result()
+```
+
+---
+
+## Testing Guide — How to Verify Everything Works
+
+### Quick Smoke Test (2 minutes)
+```bash
+source .venv/bin/activate
+
+# 1. Unit tests (14 tests — router, agent graph, state model)
+pytest tests/ -v
+
+# 2. Start API server
+uvicorn ip_agent.api:app --host 0.0.0.0 --port 8001 &
+
+# 3. Health check
+curl http://localhost:8001/health
+
+# 4. Start Streamlit UI
+streamlit run app.py --server.port 8501 &
+open http://localhost:8501
+```
+
+### FastAPI Endpoint Tests
+```bash
+# Health check — verifies database, agent, embeddings are OK
+curl -s http://localhost:8001/health | python3 -m json.tool
+# Expected: {"status": "healthy", "components": {"agent": "ok", "database": "ok", "embeddings": "ok"}}
+
+# Query endpoint — real LLM call, costs ~$0.001
+curl -s -X POST http://localhost:8001/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What are the timing violations?"}' | python3 -m json.tool
+# Expected: {"answer": "...", "model_used": "gpt-4o-mini", "guardrail_score": 1.0, ...}
+
+# Query with chat history
+curl -s -X POST http://localhost:8001/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "How do I fix them?", "chat_history": [{"role": "user", "content": "What are the timing violations?"}, {"role": "assistant", "content": "Found 2 setup violations..."}]}'
+```
+
+### A2A Protocol Tests (Agent-to-Agent)
+```bash
+# Discovery — other agents find your capabilities via well-known URL
+curl -s http://localhost:8001/.well-known/agent.json | python3 -m json.tool
+# Expected: AgentCard with name, skills (search, analyze, suggest, explain), capabilities
+
+# Task delegation — another agent sends you a task
+curl -s -X POST http://localhost:8001/a2a \
+  -H "Content-Type: application/json" \
+  -d '{"id": "test-1", "message": {"role": "user", "parts": [{"type": "text", "text": "Explain WNS and TNS"}]}}' | python3 -m json.tool
+# Expected: {"id": "test-1", "status": "completed", "result": {"parts": [{"type": "text", "text": "..."}]}}
+```
+
+### MCP Server Tests (Model Context Protocol)
+```bash
+# Verify MCP server imports and registers tools
+python -c "
+from ip_agent.mcp_server import mcp
+print(f'Server: {mcp.name}')
+for name in mcp._tool_manager._tools:
+    print(f'  Tool: {name}')
+"
+# Expected: 4 tools: search_eda_docs, search_timing_data, get_fix_suggestion, explain_concept
+
+# Run MCP server (stdio mode — for Claude Desktop / Cursor integration)
+python -m ip_agent.mcp_server
+
+# Configure in Claude Desktop (~/.config/claude/claude_desktop_config.json):
+# {
+#   "mcpServers": {
+#     "ip-design-agent": {
+#       "command": "python",
+#       "args": ["-m", "ip_agent.mcp_server"],
+#       "cwd": "/path/to/ip-design-agent",
+#       "env": {"OPENAI_API_KEY": "sk-..."}
+#     }
+#   }
+# }
+```
+
+### Multi-Agent Timing Closure Demo
+```bash
+# Full 3-agent orchestrator (Timing → DRC → Physical → Merge)
+python demo_multi_agent.py
+# Expected output:
+#   - TimingAgent finds 2 violations (WNS: -0.140ns, TNS: -0.190ns)
+#   - DRCAgent finds 5 violations (1 CRITICAL, 3 ERROR, 1 WARNING), congested=True
+#   - PhysicalAgent generates 7 ECO commands (conservative sizing due to DRC)
+#   - fix_timing.tcl script with size_cell commands
+```
+
+### Streamlit UI Tests
+```bash
+streamlit run app.py --server.port 8501
+open http://localhost:8501
+```
+**Chat tab:** Type "What are the timing violations?" — see answer + collapsible execution trace
+**Timing Closure tab:**
+1. Select a block from the dropdown (15 sample blocks: block_alu, block_fpu, block_pcie_phy, etc.)
+2. Click "Run Timing Closure" to see step-by-step agent execution
+3. See before/after comparison with cell-level changes
+4. Download the ECO Tcl script
+
+### Docker Tests
+```bash
+docker compose up -d
+curl http://localhost:8001/health                    # FastAPI
+curl http://localhost:8001/.well-known/agent.json    # A2A discovery
+curl -X POST http://localhost:8001/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "How do I fix setup violations?"}'
+open http://localhost:8501                           # Streamlit UI
+docker compose down
+```
+
+---
+
+## Build Guide Completion Status
+
+All 12 days from `build_guide.html` are **COMPLETE**:
+
+| Day | Topic | Status | Verified |
+|-----|-------|--------|----------|
+| 1 | Environment Setup | DONE | .venv, pyproject.toml, .env, PostgreSQL 16 + pgvector |
+| 2 | config.py + models.py + router.py | DONE | 8 regex rules, 14 tests pass |
+| 3 | retriever.py — Hybrid Search | DONE | pgvector + BM25 + RRF working |
+| 4-5 | ingest.py + etl.py — Ingestion | DONE | 41 chunks ingested (14 docs + 27 reports) |
+| 6-7 | tools.py + agent.py — LangGraph Agent | DONE | 6 tools, 5 nodes, conditional edges |
+| 8 | MCP Server + A2A + FastAPI | DONE | 4 MCP tools, /a2a endpoint, /query, /health |
+| 9 | Streamlit UI + EDA Bridge | DONE | 2-tab UI (Chat + Timing Closure), eda_bridge.py |
+| 10 | Guardrails + Cost Router + Orchestrator | DONE | 3-layer guardrails, cost routing, 3-agent orchestrator |
+| 11 | Tests + RAGAS Evaluation | DONE | 14 tests passing, eval_ragas.py ready |
+| 12 | Docker + Deploy + GitHub | DONE | Docker build OK, pushed to github.com/guris12/ipdesignagentEDA |
+
+### Verified Test Results (April 19, 2026)
+- **pytest:** 14/14 tests passing
+- **FastAPI /health:** `{"status": "healthy", "components": {"agent": "ok", "database": "ok", "embeddings": "ok"}}`
+- **FastAPI /query:** Returns timing violation analysis with guardrail_score 1.0
+- **A2A /.well-known/agent.json:** Returns AgentCard with 4 skills
+- **A2A /a2a task:** Returns completed task with WNS/TNS explanation
+- **MCP server:** 4 tools registered (search_eda_docs, search_timing_data, get_fix_suggestion, explain_concept)
+- **demo_multi_agent.py:** 7 ECO commands generated (DRC-aware conservative sizing)
+- **Streamlit UI:** Chat tab + Timing Closure tab with before/after comparison
+
 ---
 
 ## Key Files to Understand
