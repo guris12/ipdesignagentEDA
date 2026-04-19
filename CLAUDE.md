@@ -546,61 +546,121 @@ down to 2-3. The 2-8 hours of human analysis between STA runs → 30 seconds.
 
 ---
 
-## Phase 2 — Live OpenROAD Flow + Agent on AWS (Interview Killer Demo)
+## Phase 2 — Live OpenROAD + AI Training Platform on AWS
 
 **Status:** PLANNED — build when invited for interview, or before May 6 apply date
 **Estimated effort:** 8-12 hours
-**Monthly AWS cost:** ~$60-80/month (run only for interview week, then tear down)
+**Monthly AWS cost:** ~$15-25/month (small instances, sufficient for demo designs)
 
-### The Goal
+### The Vision — Not Just a Demo, a Training Platform
 
-Two live services on AWS, talking to each other:
+This isn't just "run a flow and analyze" — it's an **interactive EDA training platform**
+where users learn physical design by doing:
+
+1. **Run a real P&R flow** on a sample design (GCD, RISC-V core) with sky130 PDK
+2. **See real violations** — the AI agent explains what each violation means and why
+3. **Learn to fix them** — agent walks the user through ECO strategies step by step
+4. **Apply the fix** — ECO Tcl script fed back, re-run, see WNS improve
+5. **Track progress** — dashboard shows timing convergence across iterations
+
+**Target users:**
+- New PD engineers learning timing closure (onboarding tool)
+- University students studying VLSI (educational platform)
+- Synopsys customers learning OpenROAD/OpenSTA (training product)
+- Interview demo showing Gursimran can build AI + EDA products
+
+This reframes the project from "portfolio demo" → "product prototype" — exactly what
+a Principal AI Flow Development Engineer should be thinking about.
+
+### Architecture
 
 ```
-┌─────────────────────────────────┐       ┌──────────────────────────────────┐
-│  ECS Task 1: OpenROAD Runner    │       │  ECS Task 2: ip-design-agent     │
-│                                 │       │                                  │
-│  - OpenROAD-flow-scripts        │  EFS  │  - FastAPI + Streamlit           │
-│  - sky130 PDK                   │──────→│  - Reads .rpt from shared volume │
-│  - Runs synthesis → P&R → STA   │volume │  - MCP tools ingest new reports  │
-│  - Dumps .rpt to /data/reports/ │       │  - Agent analyzes violations     │
-│  - Receives fix_timing.tcl back │←──────│  - Generates ECO Tcl script      │
-│                                 │       │  - Feeds ECO back for re-run     │
-└─────────────────────────────────┘       └──────────────────────────────────┘
+┌──────────────────────────────────┐       ┌──────────────────────────────────┐
+│  ECS Task 1: OpenROAD Runner     │       │  ECS Task 2: ip-design-agent     │
+│                                  │       │                                  │
+│  - OpenROAD-flow-scripts         │  EFS  │  - FastAPI + Streamlit           │
+│  - sky130 PDK                    │──────→│  - Reads .rpt from shared volume │
+│  - Runs synthesis → P&R → STA    │volume │  - MCP tools ingest new reports  │
+│  - Dumps .rpt to /data/reports/  │       │  - Agent analyzes + teaches      │
+│  - Receives fix_timing.tcl back  │←──────│  - Generates ECO Tcl script      │
+│                                  │       │  - Tracks learning progress      │
+└──────────────────────────────────┘       └──────────────────────────────────┘
          ↑                                          ↑
-    c6g.xlarge (4 vCPU, 8GB)                 c6g.large (2 vCPU, 4GB)
-    Spot instance (~$0.04/hr)                On-demand (~$0.07/hr)
+    t4g.medium (2 vCPU, 4GB)                 t4g.small (2 vCPU, 2GB)
+    Spot (~$0.013/hr)                        On-demand (~$0.017/hr)
 ```
 
-**Live demo flow:**
-1. Open Streamlit UI at `https://agent.yourdomain.com`
-2. Click "Run OpenROAD Flow" on `gcd` design with sky130 PDK
-3. OpenROAD container runs synthesis → floorplan → place → CTS → route → STA (~3 min)
-4. Real `.rpt` files land on shared EFS volume
-5. Agent auto-ingests reports, analyzes real violations
-6. 3-agent orchestrator generates DRC-aware ECO script
-7. ECO fed back to OpenROAD container → re-run STA → show improvement
-8. Interactive dashboard shows WNS/TNS trending across iterations
+**Why small instances are enough:**
+- `gcd` design is ~400 cells — runs in ~5-7 min even on t4g.medium
+- `ibex` (15K cells) takes ~20-25 min on t4g.medium — still fine for training
+- Agent is lightweight (FastAPI + LLM API calls) — t4g.small is plenty
+- This is training, not production tapeout — users expect to wait a few minutes
 
-### Architecture — AWS Infrastructure (Terraform)
+### Training Platform Features
+
+**Guided Learning Mode (Streamlit UI):**
+```
+┌─────────────────────────────────────────────────────────┐
+│  🎓 EDA Training Platform                               │
+│                                                         │
+│  Lesson 1: Understanding Timing Reports                 │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │ ▶ Run OpenROAD flow on GCD design (sky130 PDK)   │  │
+│  │   [Run Flow]  Design: [gcd ▼]  PDK: [sky130hd ▼] │  │
+│  └───────────────────────────────────────────────────┘  │
+│                                                         │
+│  Step 1/5: Flow complete! 3 timing paths generated.     │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │ 🤖 Agent: "I found 2 setup violations. Let me    │  │
+│  │ explain what this means..."                       │  │
+│  │                                                   │  │
+│  │ Q: "What is slack and why is -0.14ns bad?"        │  │
+│  │ A: "Slack = required time - arrival time. When    │  │
+│  │ negative, data arrives AFTER the clock edge..."   │  │
+│  └───────────────────────────────────────────────────┘  │
+│                                                         │
+│  Step 2/5: Let's fix the worst violation.               │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │ 🤖 Agent: "The worst path goes through FA_X1.    │  │
+│  │ We can upsize it. But first, check DRC..."        │  │
+│  │                                                   │  │
+│  │ [Apply ECO]  [Skip to next lesson]  [Ask why]     │  │
+│  └───────────────────────────────────────────────────┘  │
+│                                                         │
+│  📊 Your Progress: Lesson 1 ████████░░ 80%              │
+│  WNS: -0.14ns → -0.02ns (after 2 ECO iterations)       │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Training Lessons (built-in curriculum):**
+
+| Lesson | Topic | Design | What User Learns |
+|--------|-------|--------|-----------------|
+| 1 | Understanding Timing Reports | gcd | Read .rpt files, slack, WNS/TNS |
+| 2 | Setup Violation Fixing | gcd | Cell upsizing, buffer insertion |
+| 3 | DRC-Aware ECO | gcd | Why fixes can break DRC, congestion |
+| 4 | Multi-Corner Analysis | gcd | Same path, different corners |
+| 5 | Full Timing Closure | ibex | End-to-end on a real RISC-V core |
+
+### AWS Infrastructure (Terraform)
 
 ```
 eu-west-1 (Dublin)
 ├── VPC + Subnets (existing from Phase 1)
 ├── ECS Cluster
-│   ├── Service: openroad-runner (Fargate Spot, c6g.xlarge)
+│   ├── Service: openroad-runner (Fargate Spot, t4g.medium)
 │   │   └── Docker: openroad/flow-ubuntu22.04-builder + sky130
-│   ├── Service: ip-design-agent (Fargate, c6g.large)
+│   ├── Service: ip-design-agent (Fargate, t4g.small)
 │   │   └── Docker: ip-design-agent (existing Dockerfile)
-│   └── Service: streamlit-ui (Fargate, t4g.small)
+│   └── Service: streamlit-ui (Fargate, t4g.micro)
 │       └── Docker: ip-design-agent (streamlit command)
 ├── RDS PostgreSQL 16 + pgvector (existing from Phase 1)
 ├── EFS (Elastic File System) — shared volume for .rpt files
 │   └── /data/reports/ — OpenROAD writes, Agent reads
 ├── ALB (Application Load Balancer)
-│   ├── agent.yourdomain.com → ip-design-agent:8001
-│   └── ui.yourdomain.com → streamlit:8501
-├── S3 + CloudFront (existing — dashboards)
+│   ├── api.yourdomain.com → ip-design-agent:8001
+│   └── train.yourdomain.com → streamlit:8501
+├── S3 + CloudFront (existing — dashboards + training progress)
 └── CloudWatch — logs, metrics, alarms
 ```
 
@@ -671,30 +731,31 @@ ls -la ${OUTPUT_DIR}/
 
 ### Sample Designs Available (OpenROAD-flow-scripts)
 
-| Design | Cells | Runtime (M-series) | Runtime (c6g.xlarge) | Use Case |
-|--------|-------|--------------------|-----------------------|----------|
-| `gcd` | ~400 | ~2-3 min | ~3-4 min | Quick demo (GCD algorithm) |
-| `ibex` | ~15K | ~8-10 min | ~12-15 min | RISC-V core (impressive) |
-| `aes_cipher` | ~20K | ~10-15 min | ~15-20 min | Crypto block |
-| `jpeg` | ~40K | ~20-30 min | ~25-35 min | Large design (show scale) |
+| Design | Cells | Runtime (t4g.medium) | Difficulty | Use Case |
+|--------|-------|---------------------|------------|----------|
+| `gcd` | ~400 | ~5-7 min | Beginner | Quick training (GCD algorithm) |
+| `ibex` | ~15K | ~20-25 min | Intermediate | RISC-V core (impressive) |
+| `aes_cipher` | ~20K | ~25-30 min | Intermediate | Crypto block |
+| `jpeg` | ~40K | ~40-50 min | Advanced | Large design (show scale) |
 
-**Recommended for demo:** `gcd` (fast) + `ibex` (impressive RISC-V core)
+**Recommended for training:** Start with `gcd` (fast feedback loop), graduate to `ibex`
 
-### AWS Cost Estimate
+### AWS Cost Estimate (Small Instances)
 
-| Resource | Spec | $/hr | $/month (24/7) | Interview week only |
-|----------|------|------|----------------|---------------------|
-| OpenROAD Runner | c6g.xlarge Spot | ~$0.04 | ~$29 | ~$7 (run on demand) |
-| ip-design-agent | c6g.large | ~$0.07 | ~$50 | ~$12 |
-| Streamlit UI | t4g.small | ~$0.02 | ~$14 | ~$3 |
-| RDS PostgreSQL | db.t4g.micro | ~$0.02 | ~$14 | ~$3 |
+| Resource | Spec | $/hr | $/month (24/7) | Interview week |
+|----------|------|------|----------------|----------------|
+| OpenROAD Runner | t4g.medium Spot | ~$0.013 | ~$9 | ~$2 |
+| ip-design-agent | t4g.small | ~$0.017 | ~$12 | ~$3 |
+| Streamlit UI | t4g.micro | ~$0.008 | ~$6 | ~$1.50 |
+| RDS PostgreSQL | db.t4g.micro | ~$0.016 | ~$12 | ~$3 |
 | EFS | 1 GB | — | ~$0.30 | ~$0.10 |
-| ALB | — | ~$0.02 | ~$16 | ~$4 |
+| ALB | — | ~$0.023 | ~$16 | ~$4 |
 | S3 + CloudFront | dashboards | — | ~$1 | ~$0.25 |
-| **Total** | | | **~$125/month** | **~$30 for 1 week** |
+| **Total** | | | **~$56/month** | **~$14 for 1 week** |
 
-**Strategy:** Deploy 2-3 days before interview, demo live, tear down after.
-Run `terraform destroy` to avoid ongoing costs.
+**Compared to original plan:** $125/month → $56/month (55% savings).
+Small instances are fine — GCD takes 5-7 min on t4g.medium, perfectly acceptable
+for a training platform where users are learning between iterations.
 
 ### Implementation Steps (8-12 hours)
 
@@ -713,9 +774,9 @@ Run `terraform destroy` to avoid ongoing costs.
 
 **Step 3: Terraform — EFS + OpenROAD ECS (3 hours)**
 - Write `efs.tf`: file system, mount targets, security group
-- Write `ecs_openroad.tf`: task definition with EFS mount, Fargate Spot
+- Write `ecs_openroad.tf`: task definition with EFS mount, Fargate Spot (t4g.medium)
 - Write `ecr_openroad.tf`: ECR repo for OpenROAD image
-- Update existing `ecs.tf`: add EFS mount to agent task
+- Update existing `ecs.tf`: add EFS mount to agent task (t4g.small)
 - Add API endpoint: `POST /run-flow` triggers OpenROAD ECS task
 
 **Step 4: Build + Push + Deploy (2 hours)**
@@ -725,9 +786,9 @@ Run `terraform destroy` to avoid ongoing costs.
 - Verify both services running
 
 **Step 5: End-to-End Test (1-2 hours)**
-- Hit live URL: `https://agent.yourdomain.com/health`
+- Hit live URL: `https://api.yourdomain.com/health`
 - Trigger flow: `POST /run-flow {"design": "gcd", "pdk": "sky130hd"}`
-- Wait 3-4 minutes for OpenROAD to complete
+- Wait 5-7 minutes for OpenROAD to complete on t4g.medium
 - Query agent: "What are the timing violations in the latest run?"
 - Agent reads real `.rpt` from EFS, analyzes, returns real violations
 - Run Timing Closure → get real ECO script
@@ -737,43 +798,54 @@ Run `terraform destroy` to avoid ongoing costs.
 
 | They See | What It Proves |
 |----------|---------------|
-| Real OpenROAD flow running on AWS | Can integrate with actual EDA tools at scale |
+| Real OpenROAD flow running on AWS | Can integrate with actual EDA tools |
 | Real timing reports (not sample data) | Agent handles production data |
-| ECO script fed back → re-run → improvement | **Closed-loop automation** — the holy grail |
-| sky130 PDK on RISC-V core (ibex) | Knows open-source EDA ecosystem |
-| Terraform IaC for entire stack | Production deployment, not laptop demo |
-| EFS shared volume between services | Understands distributed systems architecture |
-| Costs ~$30 for interview week | Cost-conscious engineering (Synopsys cares) |
-| `terraform destroy` tears it all down | Clean, reproducible infrastructure |
+| ECO fed back → re-run → improvement | **Closed-loop automation** |
+| Training mode with guided lessons | **Product thinking**, not just tech demo |
+| sky130 PDK on RISC-V core | Knows open-source EDA ecosystem |
+| Small instances, cost-optimized | Cost-conscious engineering |
+| Terraform IaC, `terraform destroy` | Production deployment mindset |
+| "Users can learn PD with this" | Sees AI as **enabler for humans**, not replacement |
 
 ### Live Demo Script (for interview)
 
 ```
-"Let me show you the system running live on AWS..."
+"Let me show you the system running live on AWS — it's actually a training
+platform for learning timing closure..."
 
-1. Open https://ui.yourdomain.com (Streamlit)
+1. Open https://train.yourdomain.com (Streamlit)
 2. "I'll trigger a real OpenROAD flow on the GCD design with sky130 PDK"
    → Click "Run OpenROAD Flow" → show ECS task starting
-3. "While that runs (~3 min), let me show the agent on existing data"
-   → Chat: "What are the timing violations?" → real answer
-4. "Flow complete — let's see what the real reports show"
+3. "While that runs (~5 min on a small instance), let me show the training mode"
+   → Walk through Lesson 1: "The agent explains what slack means..."
+4. "Flow complete — now the user sees REAL violations, not textbook examples"
    → Chat: "Analyze the latest OpenROAD run"
-   → Agent reads real .rpt from EFS, shows real WNS/TNS
-5. "Now the 3-agent orchestrator generates DRC-aware fixes"
-   → Timing Closure tab → real ECO script
-6. "Feed the ECO back and re-run — watch the dashboard"
+   → Agent reads real .rpt from EFS, explains each violation
+5. "The 3-agent orchestrator shows how a senior engineer would approach this"
+   → Timing Closure tab → real ECO script with explanations
+6. "Feed the ECO back → re-run → the user SEES timing improve"
    → Dashboard shows WNS improving across iterations
-7. "All of this is Terraform — I can tear it down and recreate in 10 minutes"
-   → Show terraform/ecs_openroad.tf
+7. "A new PD engineer could use this on day 1 to learn the closure loop"
+   → "And it costs $14/week to run — cheaper than any training course"
+8. "All Terraform — reproducible, teardown in seconds"
 ```
+
+### Future Training Platform Features (if productized)
+
+- **User accounts** — track progress across sessions (Cognito + DynamoDB)
+- **Leaderboard** — who closed timing in fewest iterations
+- **Custom designs** — upload your own Verilog, run through the flow
+- **Multi-corner training** — Lesson 4+ uses ss/ff/tt corners
+- **Slack integration** — training bot in #new-engineers channel
+- **LMS integration** — SCORM export for Synopsys internal training
 
 ### When to Build
 
-- **NOW:** Document the plan (this section) — DONE
+- **NOW:** Plan documented — DONE
 - **After interview invitation:** Build Steps 1-5 (8-12 hours)
 - **2-3 days before interview:** Deploy to AWS, test live
-- **After interview:** `terraform destroy` — save costs
-- **If no invitation by June 2026:** Build anyway for portfolio (shows initiative)
+- **After interview:** Keep running if productizing, else `terraform destroy`
+- **Pitch to Synopsys:** "I built this as a training tool — imagine this for your customers"
 
 ---
 
