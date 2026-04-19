@@ -111,7 +111,7 @@ class TimingAgent(SpecialistAgent):
         if raw_report:
             blocks = raw_report.split("Startpoint:")
             for block in blocks[1:]:
-                slack_match = re.search(r"slack\s*\(VIOLATED\)\s*([-\d.]+)", block)
+                slack_match = re.search(r"(-?\d+\.\d+)\s+slack\s*\(VIOLATED\)", block)
                 if slack_match:
                     slack = float(slack_match.group(1))
                     ep_match = re.search(r"Endpoint:\s*(.+)", block)

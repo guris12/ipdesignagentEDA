@@ -141,7 +141,7 @@ ROUTING_RULES: list[RoutingRule] = [
         route=Route.EXPLAIN_CONCEPT,
         patterns=[
             r"(?i)what\s+is\s+(a\s+)?(setup\s+time|hold\s+time|slack|clock\s+skew|jitter)",
-            r"(?i)(define|explain|describe)\s+(setup|hold|slack|skew|metastability)",
+            r"(?i)(define|explain|describe)\s+.{0,20}(setup|hold|slack|skew|metastability|timing|clock|jitter)",
             r"(?i)difference\s+between\s+.+\s+and\s+",
         ],
         priority=50,

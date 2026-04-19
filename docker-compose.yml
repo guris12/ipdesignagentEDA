@@ -25,7 +25,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@db:5432/ip_design
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/ip_design
     depends_on:
       db:
         condition: service_healthy
@@ -39,7 +39,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@db:5432/ip_design
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/ip_design
     depends_on:
       - api
 
@@ -50,7 +50,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@db:5432/ip_design
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/ip_design
     depends_on:
       db:
         condition: service_healthy
