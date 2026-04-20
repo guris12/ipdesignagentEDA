@@ -11,19 +11,25 @@ MCMM multi-corner analysis.
 
 ---
 
-## Project Structure (37 files)
+## Project Structure (42 files)
 
 ```
 ip-design-agent/
 ├── .env.example                    # Template — copy to .env, fill in keys
-├── .gitignore
+├── .gitignore                      # Excludes .env, *.tfstate, tfplan, .terraform/
 ├── pyproject.toml                  # Dependencies (Python 3.11+, hatch build)
-├── Dockerfile                      # python:3.12-slim
+├── Dockerfile                      # python:3.12-slim (agent + Streamlit)
+├── Dockerfile.openroad             # OpenROAD runner with sky130 PDK
 ├── docker-compose.yml              # 4 services: db, api, ui, mcp
+├── deploy.sh                       # One-command deploy: build → push → ECS restart
+├── start.sh                        # Container entrypoint: DB init → auto-ingest → services
+├── run_flow.sh                     # OpenROAD flow entry point script
+├── job_server.sh                   # OpenROAD EFS job queue watcher
+├── architecture.html               # Interactive architecture diagram (interview visual)
 ├── app.py                          # Streamlit demo UI (port 8501)
 ├── demo_multi_agent.py             # 3-agent timing closure demo (interview showcase)
-├── demo_timing_dashboard.py        # Timing dashboard demo with OpenROAD integration (NEW)
-├── test_dashboard_standalone.py    # Standalone dashboard generator (NEW)
+├── demo_timing_dashboard.py        # Timing dashboard demo with OpenROAD integration
+├── test_dashboard_standalone.py    # Standalone dashboard generator
 ├── src/
 │   ├── __init__.py
 │   └── ip_agent/
@@ -66,11 +72,21 @@ ip-design-agent/
 │   ├── test_agent.py               # TestAgentGraph + TestAgentState
 │   └── eval_ragas.py               # RAGAS evaluation (4 EDA test cases)
 └── terraform/                      # AWS deployment (eu-west-1 Dublin)
-    ├── main.tf, ecs.tf, rds.tf, secrets.tf, ecr.tf, cloudwatch.tf
-    ├── s3_dashboards.tf            # S3 bucket for dashboard hosting (200 lines) (NEW)
-    ├── cloudfront_dashboards.tf    # CDN distribution (150 lines) (NEW)
-    ├── variables.tf, outputs.tf, deploy.sh
-    └── (in ../ip-design-agent-terraform/ until consolidated)
+    ├── .gitignore                  # Excludes .terraform/, *.tfstate, tfplan
+    ├── main.tf                     # VPC, subnets, ALB, security groups
+    ├── ecs.tf                      # Fargate service + task definition + ALB rules
+    ├── ecs_openroad.tf             # OpenROAD runner ECS service
+    ├── rds.tf                      # PostgreSQL 16.6 + pgvector
+    ├── efs.tf                      # Shared volume for agent ↔ OpenROAD
+    ├── ecr.tf                      # Docker image registries
+    ├── secrets.tf                  # AWS Secrets Manager
+    ├── dns.tf                      # Route53 + ACM certificate
+    ├── cloudwatch.tf               # Dashboard + alarms
+    ├── s3_dashboards.tf            # S3 bucket for dashboard hosting
+    ├── cloudfront_dashboards.tf    # CDN distribution
+    ├── variables.tf, outputs.tf
+    ├── terraform.tfvars.example    # Template (real .tfvars in .gitignore)
+    └── deploy.sh                   # Terraform wrapper script
 ```
 
 ---
@@ -208,12 +224,13 @@ timing_analysis → drc_check → physical_fix → merge → END
     {
       "mcpServers": {
         "ip-design-agent": {
-          "type": "sse",
-          "url": "https://api.viongen.in/mcp/sse"
+          "command": "npx",
+          "args": ["-y", "mcp-remote", "https://api.viongen.in/mcp/sse"]
         }
       }
     }
     ```
+    Config location: `~/Library/Application Support/Claude/claude_desktop_config.json`
 
     **Connect from Cursor IDE (remote):**
     ```json
@@ -221,14 +238,14 @@ timing_analysis → drc_check → physical_fix → merge → END
     {
       "mcpServers": {
         "ip-design-agent": {
-          "type": "sse",
-          "url": "https://api.viongen.in/mcp/sse"
+          "command": "npx",
+          "args": ["-y", "mcp-remote", "https://api.viongen.in/mcp/sse"]
         }
       }
     }
     ```
 
-    **Interview pitch:** *"The MCP server is live at api.viongen.in. Paste this two-line config
+    **Interview pitch:** *"The MCP server is live at api.viongen.in. Paste this config
     in Claude Desktop and you immediately get EDA search tools backed by real OpenROAD/OpenSTA
     documentation and timing reports — served from Dublin."*
 
@@ -273,9 +290,15 @@ docker compose up -d
 # A2A: http://localhost:8001/.well-known/agent.json
 ```
 
-### Terraform (AWS)
+### Deploy to AWS (one command)
 ```bash
-# Main app deployment (ECS + RDS)
+bash deploy.sh
+# Runs: ECR login → docker build → push → ECS restart → auto-ingest if DB empty
+# Takes ~5 minutes. Logs each step [1/6] through [6/6].
+```
+
+### Terraform (AWS — first-time setup only)
+```bash
 cd terraform/
 terraform init && terraform plan    # Preview
 terraform apply                     # Deploy to eu-west-1
