@@ -45,7 +45,8 @@ ip-design-agent/
 │       ├── specialists.py          # 3 specialist agents: TimingAgent, DRCAgent, PhysicalAgent
 │       ├── orchestrator.py         # Multi-agent LangGraph coordination
 │       ├── mcp_server.py           # FastMCP server (4 tools + 1 resource)
-│       ├── api.py                  # FastAPI: /query, /health, /dashboards, /a2a (UPDATED)
+│       ├── flow_manager.py          # EFS job queue client for OpenROAD control (NEW)
+│       ├── api.py                  # FastAPI: /query, /health, /dashboards, /a2a, /flow/* (UPDATED)
 │       └── a2a_card.py             # Agent Card for A2A discovery
 ├── data/
 │   ├── docs/
@@ -156,6 +157,80 @@ timing_analysis → drc_check → physical_fix → merge → END
 8. **AWS S3+CloudFront for dashboards** — separate from main app deployment. Static HTML files
    hosted on S3, served via CloudFront CDN in Dublin region (~$1/month). Live URLs can be
    shared during interviews: "Here's the dashboard: https://d123.cloudfront.net/..."
+
+9. **EFS job queue for interactive OpenROAD control** — instead of direct SSH/ECS Exec
+   (requires SSM permissions), uses an EFS-based job queue. Agent writes JSON job files to
+   `/shared/jobs/`, OpenROAD container polls and executes them, writes results to
+   `/shared/results/{job_id}/`. Zero Terraform changes — both containers already share EFS.
+   Supports individual stage runs, arbitrary Tcl commands (with auto liberty/SDC loading),
+   and full flows. Tcl commands auto-load liberty, .odb, and .sdc before executing.
+
+10. **Stage-specific command suggestions** — the Flow Manager UI shows context-aware
+    Tcl command pills based on the last completed stage. After CTS: report_clock_properties,
+    report_checks, etc. After routing: report_routing_layers, report_parasitic_annotation.
+    Each run is tagged with `design_pdk_stage_YYYYMMDD_HHMMSS` for traceability.
+
+11. **Per-stage HTML report generation** — after each successful stage, an interactive HTML
+    report is auto-generated using the report viewer (Bootstrap 5 + Chart.js dark theme).
+    Reports include parsed metrics, DRC convergence charts, cell distribution, IR analysis,
+    and the full log with syntax highlighting. Served via `/flow/report/{job_id}`.
+
+12. **MCP server deployment — two valid architectures:**
+
+    **Prototype (shared DB, metadata isolation):**
+    All companies share one pgvector DB. Each chunk is tagged with metadata:
+    `{ company: "broadcom", project: "pcie", corner: "ss" }`. MCP tools filter by
+    company_id derived from API key. Simple but has shared blast radius.
+
+    **Production (separate pipeline per company):**
+    Each company gets their own ETL pipeline, pgvector DB, and MCP server instance.
+    Broadcom's data never touches Synopsys's DB. Better for compliance, data residency,
+    independent scaling, and isolation. On AWS: one Terraform module instantiated per
+    customer. Same pattern as multi-tenant SaaS (e.g. Postgres row-level security analogy).
+
+    **Interview answer:** *"Shared DB with metadata labels works for a prototype. Production
+    needs separate pipelines — data isolation, compliance, independent scaling. On AWS it's
+    one Terraform module instantiated per customer."*
+
+13. **Claude Desktop MCP config** — use venv Python, not system Python. Claude Desktop
+    launches the MCP server as a subprocess. If `command: "python"` resolves to pyenv shim,
+    modules from the venv won't be found. Always use the full venv path:
+    `command: "/path/to/ip-design-agent/.venv/bin/python"`.
+
+14. **Public MCP server on AWS (SSE mode)** — the MCP server is mounted onto FastAPI using
+    `app.mount("/mcp", mcp.sse_app())`. Three lines of code in `api.py`. No new AWS
+    infrastructure needed — runs at `https://api.viongen.in/mcp/sse` from the same ECS
+    container. Anyone (interviewer, engineer, client) can connect with just a URL — no local
+    install, no Python, no API keys.
+
+    **Connect from Claude Desktop (remote):**
+    ```json
+    {
+      "mcpServers": {
+        "ip-design-agent": {
+          "type": "sse",
+          "url": "https://api.viongen.in/mcp/sse"
+        }
+      }
+    }
+    ```
+
+    **Connect from Cursor IDE (remote):**
+    ```json
+    // .cursor/mcp.json
+    {
+      "mcpServers": {
+        "ip-design-agent": {
+          "type": "sse",
+          "url": "https://api.viongen.in/mcp/sse"
+        }
+      }
+    }
+    ```
+
+    **Interview pitch:** *"The MCP server is live at api.viongen.in. Paste this two-line config
+    in Claude Desktop and you immediately get EDA search tools backed by real OpenROAD/OpenSTA
+    documentation and timing reports — served from Dublin."*
 
 ---
 
@@ -339,6 +414,147 @@ def run_async(coro):
         return pool.submit(asyncio.run, coro).result()
 ```
 
+### 10. RDS PostgreSQL 16.4 not available in eu-west-1 (FIXED)
+
+**Error:** `InvalidParameterCombination: Cannot find version 16.4 for postgres`
+
+**Root cause:** PostgreSQL 16.4 was no longer available in eu-west-1 at deploy time.
+
+**Fix:** Changed `engine_version` in `rds.tf` from `"16.4"` to `"16.6"` (earliest available).
+
+### 11. ALB listener rule exceeds 5 condition values (FIXED)
+
+**Error:** `ValidationError: A rule can only have '5' condition values and regex values`
+
+**Root cause:** The path_pattern condition had 6 values: `/api/*, /docs, /openapi.json, /health, /.well-known/*, /a2a`
+
+**Fix:** Removed `/openapi.json` (accessed via api.viongen.in host routing instead). Reduced to 5 values.
+
+### 12. ECS config.py missing DATABASE_URL in container (FIXED)
+
+**Error:** `KeyError: 'DATABASE_URL'` — container crashes on startup
+
+**Root cause:** `config.py` used `os.environ["DATABASE_URL"]` but the ECS task definition passes `DB_HOST`, `DB_PORT`, `DB_NAME` as separate env vars and `DB_CREDENTIALS` as a JSON secret from Secrets Manager.
+
+**Fix:** Updated `config.py` to use `_build_database_url()` function that constructs the URL from individual env vars when `DATABASE_URL` is not set. Supports both local (.env with DATABASE_URL) and ECS (DB_HOST + DB_CREDENTIALS JSON) patterns.
+
+### 13. langchain_pg_collection duplicate type on ECS (FIXED)
+
+**Error:** `UniqueViolation: duplicate key value violates unique constraint "pg_type_typname_nsp_index"` when creating `langchain_pg_collection` table
+
+**Root cause:** Race condition — both uvicorn (FastAPI) and streamlit start simultaneously in the container, both import `ip_agent` which triggers `_db.py` which calls `_get_embedding_collection_store()`. Two concurrent CREATE TABLE calls create the implicit PostgreSQL composite type twice.
+
+**Fix:** Added `start.sh` startup script that pre-creates the `langchain_pg_collection` and `langchain_pg_embedding` tables via raw SQL (`CREATE TABLE IF NOT EXISTS`) BEFORE starting either service. This prevents the ORM from attempting concurrent table creation.
+
+### 14. OpenROAD `openroad` binary not in PATH for Tcl commands (FIXED)
+
+**Error:** `/job_server.sh: line 83: openroad: command not found` when executing Tcl commands via the job queue.
+
+**Root cause:** The `openroad/orfs:latest` Docker image installs OpenROAD in a non-standard path (`/OpenROAD-flow-scripts/tools/install/OpenROAD/bin/`). The `make` targets work because the ORFS Makefile sources `setup_env.sh`, but direct `openroad` invocation in job_server.sh fails.
+
+**Fix:** Added `source /OpenROAD-flow-scripts/setup_env.sh` at the top of `job_server.sh` to put OpenROAD on PATH.
+
+### 15. Tcl commands fail with "No liberty libraries found" (FIXED)
+
+**Error:** `[ERROR STA-2141] No liberty libraries found.` when running `report_checks` via Tcl command job.
+
+**Root cause:** `job_server.sh` loaded the `.odb` database but not the liberty file (`.lib`) or SDC constraints. OpenROAD needs all three for timing analysis.
+
+**Fix:** Updated the Tcl command handler in `job_server.sh` to auto-load the PDK liberty file and latest SDC before running the user's command:
+```bash
+read_liberty platforms/${pdk}/lib/*.lib
+read_db results/${pdk}/${design}/base/*.odb
+read_sdc results/${pdk}/${design}/base/*.sdc
+<user_command>
+```
+
+### 16. RDS empty — ingest path wrong inside Docker container (FIXED)
+
+**Error:** `train.viongen.in` returns "no timing data available" — A2A endpoint returns generic GPT answer with no real path data.
+
+**Root cause (3-layer problem):**
+
+1. **RDS is in a private subnet** — running `python -m ip_agent.ingest` from Mac silently times out. No error, no data loaded.
+2. **ECS Exec requires SSM agent** — `aws ecs execute-command` fails with `TargetNotConnectedException` on slim Python Docker images (no SSM agent installed).
+3. **Wrong data path inside container** — `ingest.py` used `Path(__file__).parent.parent.parent / "data"` which resolves to `/usr/local/lib/python3.12/data/` when installed as a package via `pip install .` — not `/app/data/` where Dockerfile copies the files.
+
+**Fix — two files changed:**
+
+**1. `src/ip_agent/ingest.py`** — fixed path resolution to check `/app/data` first:
+```python
+if os.environ.get("DATA_DIR"):
+    base_dir = Path(os.environ["DATA_DIR"])
+elif Path("/app/data").exists():
+    base_dir = Path("/app/data")   # correct path inside Docker
+else:
+    base_dir = Path(__file__).parent.parent.parent / "data"  # local dev fallback
+```
+
+**2. `start.sh`** — added auto-ingest on container startup if DB is empty:
+```bash
+# Check if RDS is empty — if yes, run ingest automatically
+python -c "... SELECT COUNT(*) FROM langchain_pg_embedding ..." && echo "skipping" || python -m ip_agent.ingest
+```
+
+**Result:** On every container start, `start.sh` checks RDS — if empty runs ingest against `/app/data/`, loads 41 chunks (14 docs + 27 timing reports). `train.viongen.in` now returns real violation data.
+
+**Verified working:**
+```
+A2A response: "Slack: -0.05 (VIOLATED), Slack: -0.14 (VIOLATED), Clock: clk, Data Required Time: 0.90"
+```
+
+**Do NOT** run ingest from Mac pointing at RDS — it silently times out (private subnet, no public access).
+
+---
+
+## AWS Deployment (Live)
+
+**Region:** eu-west-1 (Dublin, Ireland)
+**Monthly cost:** ~$57/mo (no NAT Gateway)
+
+### Live URLs
+- **Streamlit UI:** https://train.viongen.in
+- **FastAPI API:** https://api.viongen.in
+- **Dashboard CDN:** https://d15ismshdmx2su.cloudfront.net
+- **Health check:** https://api.viongen.in/health
+- **A2A discovery:** https://api.viongen.in/.well-known/agent.json
+
+### Infrastructure (16 Terraform files)
+| Resource | Details |
+|----------|---------|
+| VPC | 10.0.0.0/16, 2 public + 2 private subnets, NO NAT Gateway |
+| ALB | HTTPS with ACM cert for *.viongen.in, HTTP→HTTPS redirect |
+| ECS Agent | Fargate 0.5 vCPU / 1GB, public subnet, assign_public_ip=true |
+| ECS OpenROAD | Fargate 2 vCPU / 4GB, desired_count=0 (start for training) |
+| RDS | PostgreSQL 16.6, db.t4g.micro, pgvector extension |
+| EFS | Shared volume for agent ↔ OpenROAD report exchange |
+| ECR | 2 repos (agent + openroad), lifecycle policy keeps last 10/5 |
+| Secrets Manager | 3 secrets (OpenAI, LangChain, DB credentials) |
+| Route53 | train.viongen.in → ALB, api.viongen.in → ALB |
+| ACM | Wildcard cert *.viongen.in with DNS validation |
+| S3 + CloudFront | Dashboard hosting (~$1/mo) |
+| CloudWatch | Dashboard (10 widgets) + 4 alarms |
+
+### Deploy Commands
+```bash
+cd ip-design-agent/terraform
+terraform init
+terraform plan
+terraform apply
+
+# Build and push Docker image
+aws ecr get-login-password --region eu-west-1 | docker login --username AWS --password-stdin 710387906612.dkr.ecr.eu-west-1.amazonaws.com
+docker build --platform linux/amd64 -t 710387906612.dkr.ecr.eu-west-1.amazonaws.com/ip-design-agent:latest .
+docker push 710387906612.dkr.ecr.eu-west-1.amazonaws.com/ip-design-agent:latest
+aws ecs update-service --cluster ip-design-agent-cluster --service ip-design-agent --force-new-deployment --region eu-west-1
+```
+
+### Cost Savings vs Original Plan
+- Removed NAT Gateway: -$33/mo (ECS tasks use public subnets like VoiceoverMaker)
+- Agent uses 0.5 vCPU / 1GB instead of 1 vCPU / 2GB: -$15/mo
+- OpenROAD runner off by default: $0 until training session starts
+- Total: ~$57/mo (was ~$125/mo in original plan)
+
 ---
 
 ## Testing Guide — How to Verify Everything Works
@@ -442,6 +658,43 @@ open http://localhost:8501
 3. See before/after comparison with cell-level changes
 4. Download the ECO Tcl script
 
+**Flow Manager tab (requires OpenROAD container running):**
+1. Select Design (gcd/aes/ibex) and PDK (sky130hd/sky130hs/asap7)
+2. Click individual stage buttons (Synthesis, Floorplan, Place, CTS, Route, Finish)
+3. Watch real-time logs streaming from the OpenROAD container
+4. After completion, see metrics (WNS/TNS/violations/area) + AI analysis
+5. Each run tagged with name + timestamp (e.g. `gcd_sky130hd_place_20260419_135500`)
+6. **Stage-specific command pills** — suggested Tcl commands appear below the Execute box,
+   context-sensitive to the last completed stage (e.g. after CTS: report_clock_properties)
+7. Click a command pill → populates the Execute input → click Execute → see output
+8. Tcl commands auto-load liberty (.lib), design (.odb), and constraints (.sdc) before running
+9. After stage completion, an HTML report is auto-generated (view via "View Stage Report" link)
+10. Click "Apply ECO" to execute AI-suggested Tcl fixes (size_cell, insert_buffer, etc.)
+11. ECO iteration history tracks all applied fixes with run names
+
+### Flow Manager API Tests
+```bash
+# Submit a stage job
+curl -s -X POST http://localhost:8001/flow/run-stage \
+  -H "Content-Type: application/json" \
+  -d '{"design": "gcd", "pdk": "sky130hd", "stage": "synth"}'
+# Expected: {"job_id": "abc123...", "status": "pending", "stage": "synth"}
+
+# Check job status
+curl -s http://localhost:8001/flow/status/{job_id}
+
+# Stream logs from offset
+curl -s "http://localhost:8001/flow/logs/{job_id}?offset=0"
+
+# List recent jobs
+curl -s http://localhost:8001/flow/jobs
+
+# Submit a Tcl command
+curl -s -X POST http://localhost:8001/flow/run-tcl \
+  -H "Content-Type: application/json" \
+  -d '{"design": "gcd", "pdk": "sky130hd", "command": "report_checks -path_delay max"}'
+```
+
 ### Docker Tests
 ```bash
 docker compose up -d
@@ -494,12 +747,19 @@ All 12 days from `build_guide.html` are **COMPLETE**:
 - `retriever.py` — hybrid search (pgvector + BM25 + RRF)
 - `tools.py` — 6 @tool functions the agent can invoke
 
-**OpenROAD integration & dashboards (NEW):**
+**OpenROAD integration & dashboards:**
 - `openroad_tools.py` — MCP tools for live OpenROAD flow execution (400 lines)
 - `run_tracker.py` — Track timing metrics across ECO iterations (380 lines)
 - `report_visualizer.py` — Generate HTML dashboards with Plotly (450 lines)
 - `demo_timing_dashboard.py` — End-to-end timing closure workflow demo (350 lines)
 - `test_dashboard_standalone.py` — Standalone dashboard generator (290 lines)
+
+**Flow Manager (interactive OpenROAD control):**
+- `flow_manager.py` — EFS job queue client: submit jobs, poll status, stream logs (300 lines)
+- `job_server.sh` — OpenROAD container entrypoint: watches /shared/jobs/, executes stages/Tcl, auto-loads liberty/SDC (140 lines)
+- `generate_report_viewer.py` — Parse CloudWatch/local logs → beautiful HTML stage report (1300 lines)
+- `app.py` Tab 3 — Flow Manager UI: stage buttons, command pills, run naming, real-time logs, report links (~350 lines)
+- `api.py` `/flow/*` — 6 REST endpoints: run-stage, run-tcl, status, logs, jobs, report
 
 **Production patterns:**
 - `guardrails.py` — 3-layer validation (895 lines)

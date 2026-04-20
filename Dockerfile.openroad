@@ -1,0 +1,16 @@
+FROM openroad/orfs:latest
+
+WORKDIR /OpenROAD-flow-scripts/flow
+
+# Shared volume mount point for agent <-> OpenROAD communication
+VOLUME /shared
+
+# Pre-validate that gcd design config exists
+RUN test -f designs/sky130hd/gcd/config.mk
+
+COPY run_flow.sh /run_flow.sh
+COPY job_server.sh /job_server.sh
+RUN chmod +x /run_flow.sh /job_server.sh
+
+ENTRYPOINT ["/job_server.sh"]
+CMD ["--watch-only"]

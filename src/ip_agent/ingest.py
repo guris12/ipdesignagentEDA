@@ -311,7 +311,14 @@ def ingest_all(base_dir: Path | None = None) -> dict[str, int]:
         Dict with counts: {"documentation": N, "timing_reports": M}
     """
     if base_dir is None:
-        base_dir = Path(__file__).parent.parent.parent / "data"
+        # Check env var first (set in Docker/ECS), then /app/data, then relative to source
+        import os
+        if os.environ.get("DATA_DIR"):
+            base_dir = Path(os.environ["DATA_DIR"])
+        elif Path("/app/data").exists():
+            base_dir = Path("/app/data")
+        else:
+            base_dir = Path(__file__).parent.parent.parent / "data"
 
     results = {}
 
@@ -338,6 +345,8 @@ if __name__ == "__main__":
 
     if len(sys.argv) > 1:
         base_dir = Path(sys.argv[1])
+    elif Path("/app/data").exists():
+        base_dir = Path("/app/data")
     else:
         base_dir = Path(__file__).parent.parent.parent / "data"
 

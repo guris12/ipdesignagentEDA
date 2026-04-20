@@ -1,0 +1,32 @@
+# =============================================================================
+# terraform.tfvars.example
+# =============================================================================
+# Copy this file to terraform.tfvars and fill in your values:
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# NEVER commit terraform.tfvars — it contains secrets.
+# =============================================================================
+
+# --- Secrets (REQUIRED — no defaults) ---
+db_password       = "CHANGE_ME_min_8_chars"
+openai_api_key    = "sk-..."
+langchain_api_key = "lsv2_..."
+
+# --- Domain ---
+# domain_name    = "viongen.in"                  # default
+# route53_zone_id = "Z03876111LTMIY2UWC6KV"     # default
+
+# --- ECS Agent (Streamlit + FastAPI) ---
+# ecs_task_cpu        = 512    # 0.5 vCPU (t4g.small equivalent)
+# ecs_task_memory     = 1024   # 1 GB
+# ecs_desired_count   = 1      # Set to 0 to stop (saves ~$15/mo)
+# container_image_tag = "latest"
+
+# --- ECS OpenROAD Runner (Phase 2) ---
+# openroad_task_cpu    = 2048   # 2 vCPU (t4g.medium equivalent)
+# openroad_task_memory = 4096   # 4 GB
+# openroad_image_tag   = "latest"
+
+# --- RDS ---
+# db_instance_class    = "db.t4g.micro"  # Free tier eligible
+# db_allocated_storage = 20              # GB

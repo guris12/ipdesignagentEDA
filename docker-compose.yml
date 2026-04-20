@@ -26,6 +26,9 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/ip_design
+      SHARED_DATA_PATH: /shared
+    volumes:
+      - shared-data:/shared
     depends_on:
       db:
         condition: service_healthy
@@ -40,6 +43,9 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/ip_design
+      SHARED_DATA_PATH: /shared
+    volumes:
+      - shared-data:/shared
     depends_on:
       - api
 
@@ -55,5 +61,15 @@ services:
       db:
         condition: service_healthy
 
+  # OpenROAD runner (local development)
+  openroad:
+    build:
+      context: .
+      dockerfile: Dockerfile.openroad
+    command: ["--watch-only"]
+    volumes:
+      - shared-data:/shared
+
 volumes:
   pgdata:
+  shared-data:

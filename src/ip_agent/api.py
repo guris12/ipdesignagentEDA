@@ -32,6 +32,7 @@ import ip_agent._db  # noqa: F401 — ensure SQLAlchemy patch runs first
 from ip_agent.agent import ask
 from ip_agent.a2a_card import get_agent_card
 from ip_agent.models import QueryResponse, HealthResponse
+from ip_agent.mcp_server import mcp
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,10 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+# Mount MCP server in SSE mode — accessible at https://api.viongen.in/mcp/sse
+# Anyone can connect with just the URL: Claude Desktop, Cursor, OpenAI, etc.
+app.mount("/mcp", mcp.sse_app())
 
 # CORS — allow Streamlit and other frontends
 app.add_middleware(
@@ -454,6 +459,156 @@ async def upload_to_s3(design: str, pdk: str):
     except Exception as e:
         logger.error(f"S3 upload failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Flow Management Endpoints
+# ---------------------------------------------------------------------------
+
+
+class StageRequest(BaseModel):
+    design: str = Field(default="gcd")
+    pdk: str = Field(default="sky130hd")
+    stage: str = Field(description="Stage: synth, floorplan, place, cts, route, finish")
+
+
+class TclCommandRequest(BaseModel):
+    design: str = Field(default="gcd")
+    pdk: str = Field(default="sky130hd")
+    command: str = Field(description="Tcl command to execute")
+
+
+@app.post("/flow/run-stage")
+async def run_stage(request: StageRequest):
+    """Submit a single OpenROAD stage to the job queue."""
+    try:
+        from ip_agent.flow_manager import FlowManager
+        fm = FlowManager(request.design, request.pdk)
+        job_id = fm.submit_stage(request.stage)
+        return {"job_id": job_id, "status": "pending", "stage": request.stage}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to submit stage: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/flow/run-tcl")
+async def run_tcl_command(request: TclCommandRequest):
+    """Submit a Tcl command to the job queue."""
+    try:
+        from ip_agent.flow_manager import FlowManager
+        fm = FlowManager(request.design, request.pdk)
+        job_id = fm.submit_tcl_command(request.command)
+        return {"job_id": job_id, "status": "pending"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to submit Tcl command: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/flow/status/{job_id}")
+async def get_job_status(job_id: str):
+    """Get job status and metrics."""
+    from ip_agent.flow_manager import FlowManager
+    fm = FlowManager()
+    status = fm.get_status(job_id)
+    metrics = fm.get_metrics(job_id) if status in ("complete", "failed") else None
+    return {"job_id": job_id, "status": status, "metrics": metrics}
+
+
+@app.get("/flow/logs/{job_id}")
+async def get_job_logs(job_id: str, offset: int = 0):
+    """Stream log output from byte offset."""
+    from ip_agent.flow_manager import FlowManager
+    fm = FlowManager()
+    log_content, new_offset = fm.get_log_tail(job_id, offset)
+    status = fm.get_status(job_id)
+    return {"log": log_content, "offset": new_offset, "status": status}
+
+
+@app.get("/flow/jobs")
+async def list_flow_jobs(limit: int = 20):
+    """List recent flow jobs."""
+    from ip_agent.flow_manager import FlowManager
+    fm = FlowManager()
+    return {"jobs": fm.list_jobs(limit)}
+
+
+@app.get("/flow/report/{job_id}", response_class=HTMLResponse)
+async def get_flow_report(job_id: str):
+    """
+    Serve generated stage HTML report.
+
+    Reports are written to /shared/reports/ by the Streamlit UI after
+    a stage completes. If no pre-generated report exists, generate one
+    on the fly from the job's output.log.
+    """
+    from ip_agent.config import SHARED_DATA_PATH
+
+    shared_reports = Path(SHARED_DATA_PATH) / "reports"
+    shared_reports.mkdir(parents=True, exist_ok=True)
+
+    for f in shared_reports.glob(f"*{job_id}*_report.html"):
+        return HTMLResponse(
+            content=f.read_text(),
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+
+    for f in sorted(shared_reports.glob("*_report.html"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if job_id in f.name:
+            return HTMLResponse(
+                content=f.read_text(),
+                headers={"Cache-Control": "public, max-age=3600"},
+            )
+
+    from ip_agent.flow_manager import FlowManager
+    fm = FlowManager()
+    status = fm.get_status(job_id)
+    if status != "complete":
+        raise HTTPException(status_code=404, detail=f"Job {job_id} status is '{status}', not complete")
+
+    full_log, _ = fm.get_log_tail(job_id, 0)
+    if not full_log or len(full_log) < 100:
+        raise HTTPException(status_code=404, detail=f"No log output for job {job_id}")
+
+    try:
+        import sys, importlib
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+        grv = importlib.import_module("generate_report_viewer")
+
+        run_info = grv.extract_run_info(full_log)
+        if run_info["design"] == "unknown":
+            run_info["design"] = "gcd"
+            run_info["pdk"] = "sky130hd"
+
+        html = grv.generate_html(
+            run_info=run_info,
+            stage_summary=grv.parse_stage_summary(full_log),
+            design_areas=grv.parse_design_areas(full_log),
+            cell_report=grv.parse_cell_report(full_log),
+            ir_reports=grv.parse_ir_reports(full_log),
+            drc_violations=grv.parse_drc_violations(full_log),
+            antenna=grv.parse_antenna(full_log),
+            placement_metrics=grv.parse_placement_metrics(full_log),
+            cts_metrics=grv.parse_cts_metrics(full_log),
+            routing_metrics=grv.parse_routing_metrics(full_log),
+            setup_violations=grv.parse_setup_violations(full_log),
+            metrics_json=grv.parse_metrics_json(full_log),
+            full_log=full_log,
+        )
+
+        report_path = shared_reports / f"{job_id}_report.html"
+        report_path.write_text(html)
+
+        return HTMLResponse(
+            content=html,
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+    except Exception as e:
+        logger.error(f"Report generation failed for {job_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Report generation failed: {e}")
 
 
 # ---------------------------------------------------------------------------

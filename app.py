@@ -12,6 +12,7 @@ Two tabs:
 
 import asyncio
 import concurrent.futures
+import json
 import time
 import logging
 import io
@@ -43,6 +44,15 @@ if "closure_result" not in st.session_state:
 if "closure_history" not in st.session_state:
     st.session_state.closure_history = []
 
+if "flow_jobs" not in st.session_state:
+    st.session_state.flow_jobs = {}
+
+if "flow_analysis" not in st.session_state:
+    st.session_state.flow_analysis = {}
+
+if "flow_eco_history" not in st.session_state:
+    st.session_state.flow_eco_history = []
+
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
@@ -70,6 +80,29 @@ with st.sidebar:
     - Cost routing (gpt-4o-mini / gpt-4o)
     - Guardrails (hallucination check)
     """)
+
+    st.divider()
+    st.markdown("**Connect via MCP (Claude Desktop / Cursor)**")
+    st.code("""{
+  "mcpServers": {
+    "ip-design-agent": {
+      "type": "sse",
+      "url": "https://api.viongen.in/mcp/sse"
+    }
+  }
+}""", language="json")
+    st.caption("Paste into Claude Desktop or Cursor MCP config — no install needed.")
+
+    st.divider()
+    st.markdown("**Run locally**")
+    st.code("""cd ~/Documents/JobhuntAI/ip-design-agent
+source .venv/bin/activate
+streamlit run app.py        # UI: localhost:8501
+uvicorn ip_agent.api:app    # API: localhost:8001""", language="bash")
+
+    st.divider()
+    st.markdown("**A2A Discovery**")
+    st.markdown("[agent.json](https://api.viongen.in/.well-known/agent.json) — machine-readable agent card for Agent-to-Agent protocol. Other AI agents use this URL to discover skills automatically.")
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +330,7 @@ def parse_drc_report():
 # TABS
 # ===========================================================================
 
-tab_chat, tab_closure = st.tabs(["💬 Chat", "🔧 Timing Closure"])
+tab_chat, tab_closure, tab_flow = st.tabs(["💬 Chat", "🔧 Timing Closure", "🚀 Flow Manager"])
 
 
 # ---------------------------------------------------------------------------
@@ -811,3 +844,503 @@ with tab_closure:
                     f"ECO fixes: {phys_h.get('fix_count', 0)} | "
                     f"Time: {hist['elapsed']:.1f}s"
                 )
+
+
+# ---------------------------------------------------------------------------
+# TAB 3 — Flow Manager
+# ---------------------------------------------------------------------------
+
+def _trigger_ai_analysis(job_id: str, reports: dict, metrics: dict | None):
+    """Run the agent on completed stage reports and parse ECO commands."""
+    if job_id in st.session_state.flow_analysis:
+        return
+
+    if not reports:
+        st.session_state.flow_analysis[job_id] = {
+            "findings": "No report files found for this stage.",
+            "recommendations": [],
+            "tcl_commands": [],
+        }
+        return
+
+    report_summary = ""
+    for name, content in list(reports.items())[:5]:
+        snippet = content[:3000]
+        report_summary += f"=== {name} ===\n{snippet}\n\n"
+
+    if metrics:
+        report_summary += f"\n=== Metrics ===\n{json.dumps(metrics, indent=2)}\n"
+
+    query = (
+        f"Analyze these OpenROAD flow reports. Identify timing violations, DRC issues, "
+        f"or other problems. Suggest specific ECO fixes as Tcl commands "
+        f"(size_cell, insert_buffer, etc.).\n\n{report_summary}"
+    )
+
+    try:
+        answer, trace = run_agent_with_trace(query)
+    except Exception as e:
+        answer = f"Analysis failed: {e}"
+        trace = {}
+
+    tcl_commands = []
+    for line in answer.split("\n"):
+        line_s = line.strip()
+        if line_s.startswith(("size_cell", "insert_buffer", "swap_cell",
+                              "remove_buffer", "set_dont_touch")):
+            tcl_commands.append(line_s)
+
+    st.session_state.flow_analysis[job_id] = {
+        "findings": answer,
+        "recommendations": [s.get("result", "") for s in trace.get("steps", [])],
+        "tcl_commands": tcl_commands,
+        "trace": trace,
+    }
+
+
+def _generate_stage_report(job_id: str, info: dict, fm):
+    """Generate an HTML report for a completed stage using the stage log."""
+    if info.get("report_html"):
+        return
+
+    from pathlib import Path
+
+    full_log, _ = fm.get_log_tail(job_id, 0)
+    if not full_log or len(full_log) < 100:
+        return
+
+    try:
+        from generate_report_viewer import (
+            extract_run_info, parse_stage_summary, parse_design_areas,
+            parse_cell_report, parse_ir_reports, parse_drc_violations,
+            parse_antenna, parse_placement_metrics, parse_cts_metrics,
+            parse_routing_metrics, parse_setup_violations, parse_metrics_json,
+            generate_html,
+        )
+
+        run_info = extract_run_info(full_log)
+        if run_info["design"] == "unknown":
+            run_info["design"] = info.get("design", "gcd")
+            run_info["pdk"] = info.get("pdk", "sky130hd")
+        run_info["timestamp"] = info.get("run_name", time.strftime("%Y%m%d_%H%M%S"))
+
+        html = generate_html(
+            run_info=run_info,
+            stage_summary=parse_stage_summary(full_log),
+            design_areas=parse_design_areas(full_log),
+            cell_report=parse_cell_report(full_log),
+            ir_reports=parse_ir_reports(full_log),
+            drc_violations=parse_drc_violations(full_log),
+            antenna=parse_antenna(full_log),
+            placement_metrics=parse_placement_metrics(full_log),
+            cts_metrics=parse_cts_metrics(full_log),
+            routing_metrics=parse_routing_metrics(full_log),
+            setup_violations=parse_setup_violations(full_log),
+            metrics_json=parse_metrics_json(full_log),
+            full_log=full_log,
+        )
+
+        from ip_agent.config import SHARED_DATA_PATH
+        report_dir = Path(SHARED_DATA_PATH) / "reports"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        run_name = info.get("run_name", job_id)
+        report_path = report_dir / f"{run_name}_report.html"
+        report_path.write_text(html)
+        info["report_html"] = str(report_path)
+        info["report_job_id"] = job_id
+
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Report generation failed for {job_id}: {e}")
+
+
+with tab_flow:
+    st.header("OpenROAD Flow Manager")
+    st.caption("Run individual P&R stages, see real-time logs, and get AI-powered analysis")
+
+    # --- Stage-specific suggested commands ---
+    STAGE_COMMANDS = {
+        "synth": [
+            ("report_checks -path_delay max", "Setup Timing"),
+            ("report_checks -path_delay min", "Hold Timing"),
+            ("report_design_area", "Design Area"),
+            ("report_cell_usage", "Cell Usage"),
+            ("report_power", "Power Report"),
+        ],
+        "floorplan": [
+            ("report_design_area", "Design Area"),
+            ("report_checks -path_delay max", "Setup Timing"),
+            ("report_power", "Power Report"),
+        ],
+        "place": [
+            ("report_checks -path_delay max", "Setup Timing"),
+            ("report_checks -path_delay min", "Hold Timing"),
+            ("report_design_area", "Design Area"),
+            ("report_cell_usage", "Cell Usage"),
+            ("report_power", "Power Report"),
+            ("report_check_types -max_delay -violators", "Setup Violations"),
+        ],
+        "cts": [
+            ("report_checks -path_delay max", "Setup Timing"),
+            ("report_checks -path_delay min", "Hold Timing"),
+            ("report_clock_properties", "Clock Properties"),
+            ("report_design_area", "Design Area"),
+            ("report_power", "Power Report"),
+            ("report_check_types -max_delay -violators", "Setup Violations"),
+        ],
+        "route": [
+            ("report_checks -path_delay max", "Setup Timing"),
+            ("report_checks -path_delay min", "Hold Timing"),
+            ("report_design_area", "Design Area"),
+            ("report_routing_layers", "Routing Layers"),
+            ("report_power", "Power Report"),
+            ("report_check_types -max_delay -violators", "Setup Violations"),
+            ("report_parasitic_annotation", "Parasitics"),
+        ],
+        "finish": [
+            ("report_checks -path_delay max", "Setup Timing"),
+            ("report_checks -path_delay min", "Hold Timing"),
+            ("report_design_area", "Design Area"),
+            ("report_cell_usage", "Cell Usage"),
+            ("report_routing_layers", "Routing Layers"),
+            ("report_power", "Power Report"),
+            ("report_tns", "TNS Report"),
+            ("report_wns", "WNS Report"),
+        ],
+    }
+
+    def _make_run_name(design: str, pdk: str, stage: str) -> str:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        return f"{design}_{pdk}_{stage}_{ts}"
+
+    def _get_last_completed_stage() -> str | None:
+        completed = [
+            (jid, info) for jid, info in st.session_state.flow_jobs.items()
+            if info["status"] == "complete" and info.get("stage") in STAGE_COMMANDS
+        ]
+        if not completed:
+            return None
+        return max(completed, key=lambda x: x[1].get("completed_at", ""))[1].get("stage")
+
+    # --- Configuration ---
+    col_d, col_p, col_spacer = st.columns([2, 2, 4])
+    with col_d:
+        flow_design = st.selectbox("Design", ["gcd", "aes", "ibex", "jpeg"], key="flow_design_sel")
+    with col_p:
+        flow_pdk = st.selectbox("PDK", ["sky130hd", "sky130hs", "asap7", "gf180"], key="flow_pdk_sel")
+
+    # --- Stage Control Buttons ---
+    st.subheader("Stage Control")
+    stages_list = [
+        ("synth", "Synthesis", "🧬"),
+        ("floorplan", "Floorplan", "📐"),
+        ("place", "Placement", "📍"),
+        ("cts", "CTS", "🕐"),
+        ("route", "Routing", "🔗"),
+        ("finish", "Finish", "🏁"),
+    ]
+
+    stage_cols = st.columns(len(stages_list))
+    for i, (stage_key, stage_name, stage_icon) in enumerate(stages_list):
+        with stage_cols[i]:
+            if st.button(f"{stage_icon} {stage_name}", key=f"run_{stage_key}",
+                         use_container_width=True):
+                try:
+                    from ip_agent.flow_manager import FlowManager
+                    fm = FlowManager(flow_design, flow_pdk)
+                    job_id = fm.submit_stage(stage_key)
+                    run_name = _make_run_name(flow_design, flow_pdk, stage_key)
+                    st.session_state.flow_jobs[job_id] = {
+                        "status": "pending",
+                        "stage": stage_key,
+                        "stage_name": stage_name,
+                        "run_name": run_name,
+                        "submitted_at": time.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                        "log_offset": 0,
+                        "design": flow_design,
+                        "pdk": flow_pdk,
+                    }
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to submit job: {e}")
+
+    # Full Flow button
+    col_full, col_spacer2 = st.columns([3, 5])
+    with col_full:
+        if st.button("Run Full Flow", type="primary", use_container_width=True):
+            try:
+                from ip_agent.flow_manager import FlowManager
+                fm = FlowManager(flow_design, flow_pdk)
+                job_id = fm.submit_full_flow()
+                run_name = _make_run_name(flow_design, flow_pdk, "full_flow")
+                st.session_state.flow_jobs[job_id] = {
+                    "status": "pending",
+                    "stage": "full_flow",
+                    "stage_name": "Full Flow",
+                    "run_name": run_name,
+                    "submitted_at": time.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                    "log_offset": 0,
+                    "design": flow_design,
+                    "pdk": flow_pdk,
+                }
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to submit job: {e}")
+
+    st.divider()
+
+    # --- Manual Tcl Command ---
+    st.subheader("Manual Command")
+
+    # Show suggested commands based on last completed stage
+    last_stage = _get_last_completed_stage()
+    suggested = STAGE_COMMANDS.get(last_stage, STAGE_COMMANDS["finish"]) if last_stage else STAGE_COMMANDS["synth"]
+
+    if "selected_tcl_cmd" not in st.session_state:
+        st.session_state.selected_tcl_cmd = ""
+
+    st.markdown("**Suggested commands" + (f" (after {last_stage}):" if last_stage else ":") + "**")
+    pill_cols = st.columns(min(len(suggested), 4))
+    for idx, (cmd, label) in enumerate(suggested):
+        col_idx = idx % min(len(suggested), 4)
+        with pill_cols[col_idx]:
+            if st.button(f"{label}", key=f"pill_{cmd}_{idx}", use_container_width=True):
+                st.session_state.selected_tcl_cmd = cmd
+                st.rerun()
+
+    tcl_col, btn_col = st.columns([6, 2])
+    with tcl_col:
+        tcl_cmd = st.text_input(
+            "OpenROAD Tcl command",
+            value=st.session_state.selected_tcl_cmd,
+            placeholder="report_checks -path_delay max -fields {slew cap input_pins nets}",
+            key="tcl_input",
+            label_visibility="collapsed",
+        )
+    with btn_col:
+        tcl_run = st.button("Execute", key="run_tcl", use_container_width=True)
+
+    if tcl_run and tcl_cmd:
+        st.session_state.selected_tcl_cmd = ""
+        try:
+            from ip_agent.flow_manager import FlowManager
+            fm = FlowManager(flow_design, flow_pdk)
+            job_id = fm.submit_tcl_command(tcl_cmd)
+            cmd_short = tcl_cmd.split()[0] if tcl_cmd.split() else "tcl"
+            run_name = _make_run_name(flow_design, flow_pdk, cmd_short)
+            st.session_state.flow_jobs[job_id] = {
+                "status": "pending",
+                "stage": "tcl_command",
+                "stage_name": f"Tcl: {tcl_cmd[:50]}",
+                "run_name": run_name,
+                "submitted_at": time.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "log_offset": 0,
+                "design": flow_design,
+                "pdk": flow_pdk,
+                "command": tcl_cmd,
+            }
+            st.rerun()
+        except ValueError as e:
+            st.error(f"Command blocked: {e}")
+        except Exception as e:
+            st.error(f"Failed to submit: {e}")
+
+    st.divider()
+
+    # --- Active Jobs (real-time polling) ---
+    if st.session_state.flow_jobs:
+        from ip_agent.flow_manager import FlowManager
+
+        active_ids = [
+            jid for jid, info in st.session_state.flow_jobs.items()
+            if info["status"] in ("pending", "running")
+        ]
+        completed_ids = [
+            jid for jid, info in st.session_state.flow_jobs.items()
+            if info["status"] in ("complete", "failed")
+        ]
+
+        needs_rerun = False
+
+        if active_ids:
+            st.subheader("Active Jobs")
+            fm = FlowManager(flow_design, flow_pdk)
+
+            for job_id in active_ids:
+                info = st.session_state.flow_jobs[job_id]
+                status = fm.get_status(job_id)
+                info["status"] = status
+
+                status_emoji = {"pending": "⏳", "running": "🔄", "complete": "✅", "failed": "❌"}.get(status, "❓")
+                run_label = info.get("run_name", job_id[:8])
+                submitted = info.get("submitted_at", "")
+
+                with st.expander(
+                    f"{status_emoji} {info['stage_name']} | {run_label} [{status.upper()}]",
+                    expanded=True,
+                ):
+                    if submitted:
+                        st.caption(f"Submitted: {submitted}")
+
+                    if status == "running":
+                        st.progress(50, text="Running...")
+                        needs_rerun = True
+
+                    new_log, new_offset = fm.get_log_tail(job_id, info.get("log_offset", 0))
+                    info["log_offset"] = new_offset
+
+                    if new_log:
+                        lines = new_log.strip().split("\n")
+                        display_lines = lines[-30:] if len(lines) > 30 else lines
+                        st.code("\n".join(display_lines), language="bash")
+
+                    if status == "pending":
+                        st.info("Job queued — waiting for OpenROAD container to pick it up...")
+                        needs_rerun = True
+
+                    if status in ("complete", "failed"):
+                        info["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S UTC")
+                        if status == "complete":
+                            st.success("Stage complete!")
+                        else:
+                            st.error("Stage failed!")
+                        metrics = fm.get_metrics(job_id)
+                        if metrics:
+                            mc = st.columns(4)
+                            mc[0].metric("WNS", f"{metrics.get('wns', 'N/A')} ns")
+                            mc[1].metric("Violations", metrics.get("violations", "N/A"))
+                            mc[2].metric("Runtime", f"{metrics.get('elapsed_seconds', 0)}s")
+                            mc[3].metric("Area", f"{metrics.get('area_um2', 'N/A')} um²")
+
+                        if status == "complete":
+                            reports = fm.get_reports(job_id)
+                            _trigger_ai_analysis(job_id, reports, metrics)
+                            _generate_stage_report(job_id, info, fm)
+
+            if needs_rerun:
+                time.sleep(2)
+                st.rerun()
+
+        # --- Completed Jobs with AI Analysis ---
+        if completed_ids:
+            st.subheader("Completed Stages")
+
+            for job_id in reversed(completed_ids):
+                info = st.session_state.flow_jobs[job_id]
+                status = info["status"]
+                status_emoji = "✅" if status == "complete" else "❌"
+                run_label = info.get("run_name", job_id[:8])
+                submitted = info.get("submitted_at", "")
+                completed = info.get("completed_at", "")
+
+                with st.expander(
+                    f"{status_emoji} {info['stage_name']} | {run_label}",
+                    expanded=(job_id == completed_ids[-1]),
+                ):
+                    # Run info header
+                    meta_cols = st.columns(3)
+                    meta_cols[0].markdown(f"**Run:** `{run_label}`")
+                    if submitted:
+                        meta_cols[1].markdown(f"**Submitted:** {submitted}")
+                    if completed:
+                        meta_cols[2].markdown(f"**Completed:** {completed}")
+
+                    # Metrics
+                    from ip_agent.flow_manager import FlowManager
+                    fm = FlowManager(info.get("design", "gcd"), info.get("pdk", "sky130hd"))
+                    metrics = fm.get_metrics(job_id)
+                    if metrics:
+                        mc = st.columns(5)
+                        mc[0].metric("WNS", f"{metrics.get('wns', 'N/A')} ns")
+                        mc[1].metric("TNS", f"{metrics.get('tns', 'N/A')} ns")
+                        mc[2].metric("Violations", metrics.get("violations", "N/A"))
+                        mc[3].metric("Runtime", f"{metrics.get('elapsed_seconds', 0)}s")
+                        mc[4].metric("Area", f"{metrics.get('area_um2', 'N/A')} um²")
+
+                    # Report viewer link
+                    report_path = info.get("report_html")
+                    if report_path:
+                        st.markdown(f"**[View Stage Report](/flow/report/{job_id})**")
+
+                    # AI Analysis
+                    analysis = st.session_state.flow_analysis.get(job_id)
+                    if analysis:
+                        st.markdown("---")
+                        st.markdown("**AI Analysis:**")
+                        st.markdown(analysis.get("findings", "No analysis available."))
+
+                        if analysis.get("tcl_commands"):
+                            st.markdown("---")
+                            st.markdown(f"**ECO Script** ({len(analysis['tcl_commands'])} commands):")
+                            eco_script = "\n".join(analysis["tcl_commands"])
+                            st.code(eco_script, language="tcl")
+
+                            if st.button(
+                                f"Apply ECO ({len(analysis['tcl_commands'])} commands)",
+                                key=f"eco_{job_id}",
+                            ):
+                                try:
+                                    eco_job_id = fm.submit_tcl_command(eco_script)
+                                    eco_run = _make_run_name(
+                                        info.get("design", flow_design),
+                                        info.get("pdk", flow_pdk), "eco"
+                                    )
+                                    st.session_state.flow_jobs[eco_job_id] = {
+                                        "status": "pending",
+                                        "stage": "eco_apply",
+                                        "stage_name": f"ECO from {info['stage_name']}",
+                                        "run_name": eco_run,
+                                        "submitted_at": time.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                                        "log_offset": 0,
+                                        "design": info.get("design", flow_design),
+                                        "pdk": info.get("pdk", flow_pdk),
+                                    }
+                                    st.session_state.flow_eco_history.append({
+                                        "source_job": job_id,
+                                        "eco_job": eco_job_id,
+                                        "commands": analysis["tcl_commands"],
+                                        "stage": info["stage_name"],
+                                        "run_name": eco_run,
+                                    })
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Failed to apply ECO: {e}")
+
+                    # Suggested follow-up commands
+                    stage_key = info.get("stage", "")
+                    if stage_key in STAGE_COMMANDS and status == "complete":
+                        st.markdown("---")
+                        st.markdown("**Run analysis commands for this stage:**")
+                        pcols = st.columns(min(len(STAGE_COMMANDS[stage_key]), 4))
+                        for pidx, (pcmd, plabel) in enumerate(STAGE_COMMANDS[stage_key]):
+                            ci = pidx % min(len(STAGE_COMMANDS[stage_key]), 4)
+                            with pcols[ci]:
+                                if st.button(f"{plabel}", key=f"cpill_{job_id}_{pidx}",
+                                             use_container_width=True):
+                                    st.session_state.selected_tcl_cmd = pcmd
+                                    st.rerun()
+
+                    # Full log
+                    with st.expander("Full Log"):
+                        full_log, _ = fm.get_log_tail(job_id, 0)
+                        if full_log:
+                            st.code(full_log[:50000], language="bash")
+                        else:
+                            st.info("No log output available.")
+
+        # --- ECO Iteration History ---
+        if st.session_state.flow_eco_history:
+            st.divider()
+            st.subheader("ECO Iteration History")
+            for i, eco in enumerate(st.session_state.flow_eco_history):
+                eco_run = eco.get("run_name", eco.get("eco_job", "?")[:8])
+                st.markdown(
+                    f"**Iteration {i+1}** — Stage: {eco.get('stage', '?')} | "
+                    f"Run: `{eco_run}` | "
+                    f"Commands: {len(eco.get('commands', []))}"
+                )
+
+    else:
+        st.info(
+            "No jobs yet. Click a stage button above to run an OpenROAD stage, "
+            "or use 'Run Full Flow' to execute the complete P&R flow."
+        )
