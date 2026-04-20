@@ -10,9 +10,18 @@ dist/
 build/
 *.egg-info/
 
-# Environment
+# Environment & Secrets — NEVER commit API keys
 .env
 .env.local
+.env.*
+
+# Terraform state & plans — may contain secrets
+*.tfstate
+*.tfstate.backup
+*.tfplan
+tfplan
+terraform.tfvars
+.terraform/
 
 # IDE / tool config
 .vscode/

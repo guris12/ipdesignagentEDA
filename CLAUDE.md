@@ -505,6 +505,48 @@ A2A response: "Slack: -0.05 (VIOLATED), Slack: -0.14 (VIOLATED), Clock: clk, Dat
 
 **Do NOT** run ingest from Mac pointing at RDS — it silently times out (private subnet, no public access).
 
+### 17. OpenAI API key leaked via GitHub — revoked by OpenAI (FIXED)
+
+**Error:** Email from OpenAI: "API key belonging to org 'vomaker' with name 'ipadesignagent' (sk-pro...b8A) was leaked and disabled."
+
+**Root cause:** The key was detected by OpenAI's automated GitHub secret scanning on the public repo. The `.env` file was correctly in `.gitignore` and never committed, but `terraform/tfplan` (a binary zip) was committed — Terraform plan files can contain secret values.
+
+**Fix:**
+1. Generated new OpenAI API key on platform.openai.com
+2. Updated `.env` locally
+3. Updated AWS Secrets Manager: `aws secretsmanager put-secret-value --secret-id "ip-design-agent/dev/openai-api-key" --secret-string "NEW_KEY" --region eu-west-1`
+4. Restarted ECS: `aws ecs update-service --cluster ip-design-agent-cluster --service ip-design-agent --force-new-deployment --region eu-west-1`
+5. Added `tfplan`, `*.tfstate`, `*.tfstate.backup`, `terraform.tfvars`, `.terraform/` to `.gitignore`
+6. Removed `terraform/tfplan` from git tracking: `git rm --cached terraform/tfplan`
+
+---
+
+## ⚠️ CRITICAL SECURITY RULES — API Keys
+
+**NEVER commit API keys, secrets, or credentials to git. This is non-negotiable.**
+
+Files that MUST stay in `.gitignore`:
+- `.env`, `.env.local`, `.env.*` — all env files with secrets
+- `*.tfstate`, `*.tfstate.backup` — Terraform state (contains DB passwords)
+- `tfplan`, `*.tfplan` — Terraform plan (may contain secret values)
+- `terraform.tfvars` — Terraform variables (may contain secrets)
+- `.terraform/` — Terraform provider cache
+
+**Before every commit, verify:**
+- `git diff --cached` does NOT contain `sk-`, `password`, `secret`, or API key patterns
+- No `.env` files are staged
+- No Terraform state/plan files are staged
+
+**If a key is leaked:**
+1. Revoke immediately on the provider's dashboard
+2. Generate a new key
+3. Update `.env` locally
+4. Update AWS Secrets Manager
+5. Restart ECS (`--force-new-deployment`)
+6. Check `git log` to find and remove the source
+
+**This repo is PUBLIC on GitHub — OpenAI and other providers actively scan for leaked keys.**
+
 ---
 
 ## AWS Deployment (Live)
