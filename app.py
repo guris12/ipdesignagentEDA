@@ -82,16 +82,28 @@ with st.sidebar:
     """)
 
     st.divider()
-    st.markdown("**Connect via MCP (Claude Desktop / Cursor)**")
+    st.markdown("**Connect via MCP (Claude Desktop)**")
     st.code("""{
   "mcpServers": {
     "ip-design-agent": {
-      "type": "sse",
-      "url": "https://api.viongen.in/mcp/sse"
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://api.viongen.in/mcp/sse"]
     }
   }
 }""", language="json")
-    st.caption("Paste into Claude Desktop or Cursor MCP config — no install needed.")
+    st.caption("Paste into Claude Desktop config (Settings → Developer → Edit Config). Restart Claude Desktop after saving.")
+
+    st.divider()
+    st.markdown("**Connect via MCP (Cursor IDE)**")
+    st.code("""{
+  "mcpServers": {
+    "ip-design-agent": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://api.viongen.in/mcp/sse"]
+    }
+  }
+}""", language="json")
+    st.caption("Save as .cursor/mcp.json in your project folder.")
 
     st.divider()
     st.markdown("**Run locally**")

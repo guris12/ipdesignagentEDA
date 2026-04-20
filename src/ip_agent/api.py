@@ -62,7 +62,9 @@ app = FastAPI(
 
 # Mount MCP server in SSE mode — accessible at https://api.viongen.in/mcp/sse
 # Anyone can connect with just the URL: Claude Desktop, Cursor, OpenAI, etc.
-app.mount("/mcp", mcp.sse_app())
+# allow_credentials=False avoids 421 "Misdirected Request" behind ALB
+mcp_app = mcp.sse_app()
+app.mount("/mcp", mcp_app)
 
 # CORS — allow Streamlit and other frontends
 app.add_middleware(

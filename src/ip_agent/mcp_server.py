@@ -38,6 +38,7 @@ mcp = FastMCP(
         "EDA knowledge assistant for OpenROAD/OpenSTA. "
         "Search documentation, analyze timing reports, get fix suggestions."
     ),
+    host="0.0.0.0",  # accept connections from any host (needed behind ALB proxy)
 )
 
 
