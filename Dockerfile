@@ -12,6 +12,7 @@ COPY app.py .
 COPY generate_report_viewer.py .
 COPY start.sh .
 COPY data/ data/
+COPY content/ content/
 
 RUN pip install --no-cache-dir .
 

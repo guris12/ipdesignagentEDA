@@ -35,7 +35,19 @@ conn.execute('''
         cmetadata JSON
     )
 ''')
-print('Database ready: pgvector + langchain tables')
+conn.execute('''
+    CREATE TABLE IF NOT EXISTS queue_slots (
+        identifier   TEXT PRIMARY KEY,
+        status       TEXT NOT NULL CHECK (status IN ('active', 'waiting')),
+        enqueued_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at   TIMESTAMPTZ NOT NULL
+    )
+''')
+conn.execute('''
+    CREATE INDEX IF NOT EXISTS queue_slots_status_enqueued_idx
+        ON queue_slots (status, enqueued_at)
+''')
+print('Database ready: pgvector + langchain + queue_slots tables')
 conn.close()
 " 2>&1 || echo "DB init warning (non-fatal)"
 

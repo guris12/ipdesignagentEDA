@@ -19,11 +19,15 @@ import io
 import re
 import streamlit as st
 
+from ip_agent.ui import inject_theme, render_lessons_tab
+
 st.set_page_config(
-    page_title="IP Design Intelligence Agent",
+    page_title="viongen · Learn Physical Design & STA",
     page_icon="🔧",
     layout="wide",
 )
+
+inject_theme()
 
 st.title("🔧 IP Design Intelligence Agent")
 st.caption("RAG + LangGraph agent for OpenROAD/OpenSTA timing analysis")
@@ -342,7 +346,9 @@ def parse_drc_report():
 # TABS
 # ===========================================================================
 
-tab_chat, tab_closure, tab_flow = st.tabs(["💬 Chat", "🔧 Timing Closure", "🚀 Flow Manager"])
+tab_chat, tab_closure, tab_flow, tab_learn = st.tabs(
+    ["💬 Chat", "🔧 Timing Closure", "🚀 Flow Manager", "📚 Learn"]
+)
 
 
 # ---------------------------------------------------------------------------
@@ -969,6 +975,127 @@ with tab_flow:
     st.header("OpenROAD Flow Manager")
     st.caption("Run individual P&R stages, see real-time logs, and get AI-powered analysis")
 
+    # --- Queue: one student at a time on the shared runner -----------------
+    import uuid as _uuid
+    from ip_agent.ui.components import queue_banner as _queue_banner
+
+    if "anon_id" not in st.session_state:
+        st.session_state.anon_id = "anon-" + _uuid.uuid4().hex[:10]
+    _anon_id = st.session_state.anon_id
+
+    def _fmt_mmss(seconds):
+        if seconds is None:
+            return "—"
+        seconds = max(0, int(seconds))
+        return f"{seconds // 60}:{seconds % 60:02d}"
+
+    _queue_view = None
+    try:
+        from ip_agent import queue_manager
+        _queue_view = queue_manager.state_for(_anon_id)
+    except Exception as _qe:
+        # Queue table not yet present in local dev; fail open so buttons stay usable.
+        st.caption(f":grey[Queue disabled (no DB): {_qe}]")
+
+    has_slot = bool(_queue_view and _queue_view.status == "active")
+
+    if _queue_view is not None:
+        if _queue_view.status == "active":
+            _queue_banner(
+                "active",
+                f"You have the runner for {_fmt_mmss(_queue_view.seconds_remaining)}. "
+                f"{_queue_view.waiting_count} waiting behind you.",
+            )
+        elif _queue_view.status == "waiting":
+            _queue_banner(
+                "waiting",
+                f"You're #{_queue_view.position} in queue · ETA "
+                f"{_fmt_mmss(_queue_view.eta_seconds)}. Stage buttons unlock when you're active.",
+            )
+        else:
+            _queue_banner(
+                "idle",
+                f"Runner is free. Claim the slot to start running stages. "
+                f"({_queue_view.waiting_count} waiting)",
+            )
+
+        _qc1, _qc2, _qc3 = st.columns([2, 2, 4])
+        with _qc1:
+            if st.button(
+                "🎟️ Claim slot" if not has_slot else "✓ Slot active",
+                key="queue_claim",
+                disabled=has_slot,
+                use_container_width=True,
+                type="primary" if not has_slot else "secondary",
+            ):
+                try:
+                    queue_manager.claim_slot(_anon_id)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not claim slot: {exc}")
+        with _qc2:
+            if st.button(
+                "🚪 Release slot",
+                key="queue_release",
+                disabled=(_queue_view.status == "idle"),
+                use_container_width=True,
+            ):
+                try:
+                    queue_manager.release_slot(_anon_id)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not release slot: {exc}")
+        with _qc3:
+            st.caption(f"Your session id: `{_anon_id}`")
+
+    # --- Runner status + controls ---
+    from ip_agent.flow_manager import check_runner_status, start_runner, stop_runner
+
+    if "runner_status" not in st.session_state:
+        st.session_state.runner_status = "unknown"
+    if "runner_last_check" not in st.session_state:
+        st.session_state.runner_last_check = 0
+
+    now_ts = time.time()
+    if now_ts - st.session_state.runner_last_check > 5:
+        st.session_state.runner_status = check_runner_status()
+        st.session_state.runner_last_check = now_ts
+
+    runner_status = st.session_state.runner_status
+    status_label = {
+        "running":  "🟢 Runner running",
+        "starting": "🟡 Runner starting (wait ~60s)",
+        "stopped":  "🔴 Runner stopped",
+        "unknown":  "⚪ Runner status unknown",
+    }.get(runner_status, "⚪ Runner status unknown")
+
+    status_col, btn_col1, btn_col2 = st.columns([4, 1.5, 1.5])
+    with status_col:
+        st.markdown(f"**{status_label}**")
+    with btn_col1:
+        if st.button("▶ Start Runner", key="start_runner", use_container_width=True,
+                     disabled=(runner_status in ("running", "starting"))):
+            if start_runner():
+                st.session_state.runner_status = "starting"
+                st.session_state.runner_last_check = 0
+                st.success("Runner starting…")
+            else:
+                st.warning("Could not start runner (ECS not reachable or not on AWS)")
+            st.rerun()
+    with btn_col2:
+        if st.button("⏹ Stop Runner", key="stop_runner", use_container_width=True,
+                     disabled=(runner_status == "stopped")):
+            if stop_runner():
+                st.session_state.runner_status = "stopped"
+                st.session_state.runner_last_check = 0
+                st.success("Runner stopping…")
+            else:
+                st.warning("Could not stop runner (ECS not reachable or not on AWS)")
+            st.rerun()
+
+    # link_col1 and link_col2 are filled after flow_design/flow_pdk are known (below)
+    runner_running = runner_status in ("running", "unknown")  # allow submit if unknown (local dev)
+
     # --- Stage-specific suggested commands ---
     STAGE_COMMANDS = {
         "synth": [
@@ -1040,6 +1167,56 @@ with tab_flow:
     with col_p:
         flow_pdk = st.selectbox("PDK", ["sky130hd", "sky130hs", "asap7", "gf180"], key="flow_pdk_sel")
 
+    # --- Quick-access links (design+PDK now known) ---
+    _api_base = "https://api.viongen.in"
+    _lc1, _lc2, _lc3 = st.columns([2, 2, 2])
+    with _lc1:
+        st.markdown(
+            f'<a href="{_api_base}/flow/terminal?design={flow_design}&pdk={flow_pdk}" target="_blank">'
+            f'<button style="width:100%;padding:6px 12px;background:#1f2937;color:#58a6ff;'
+            f'border:1px solid #30363d;border-radius:6px;cursor:pointer;font-size:13px;">'
+            f'💻 Open Terminal</button></a>',
+            unsafe_allow_html=True,
+        )
+    with _lc2:
+        st.markdown(
+            f'<a href="{_api_base}/flow/dashboard/{flow_design}/{flow_pdk}" target="_blank">'
+            f'<button style="width:100%;padding:6px 12px;background:#1f2937;color:#f59e0b;'
+            f'border:1px solid #30363d;border-radius:6px;cursor:pointer;font-size:13px;">'
+            f'📊 Flow Dashboard</button></a>',
+            unsafe_allow_html=True,
+        )
+    with _lc3:
+        gui_toggle_key = f"show_gui_{flow_design}_{flow_pdk}"
+        label = "🖥️ Hide GUI" if st.session_state.get(gui_toggle_key) else "🖥️ Launch GUI"
+        _gui_disabled = (_queue_view is not None) and (not has_slot)
+        if st.button(label, key=f"btn_{gui_toggle_key}", use_container_width=True,
+                     disabled=_gui_disabled):
+            was_on = st.session_state.get(gui_toggle_key, False)
+            st.session_state[gui_toggle_key] = not was_on
+            if not was_on:
+                try:
+                    from ip_agent.flow_manager import FlowManager
+                    job_id = FlowManager(flow_design, flow_pdk).submit_gui_session()
+                    st.toast(f"GUI session submitted: {job_id[:8]}")
+                except Exception as exc:
+                    st.warning(f"Could not submit GUI session: {exc}")
+            st.rerun()
+
+    if st.session_state.get(f"show_gui_{flow_design}_{flow_pdk}"):
+        from streamlit.components.v1 import iframe as _iframe
+        _gui_url = (
+            "https://gui.viongen.in/vnc.html"
+            "?autoconnect=1&resize=scale&reconnect=1&show_dot=1"
+        )
+        st.markdown(
+            f'<div style="margin: 8px 0 4px 0; font-size: 0.85rem; color: var(--text-muted);">'
+            f'Live OpenROAD GUI · <a href="{_gui_url}" target="_blank" '
+            f'style="color: var(--blue);">open in new tab ↗</a></div>',
+            unsafe_allow_html=True,
+        )
+        _iframe(_gui_url, height=820, scrolling=False)
+
     # --- Stage Control Buttons ---
     st.subheader("Stage Control")
     stages_list = [
@@ -1051,11 +1228,14 @@ with tab_flow:
         ("finish", "Finish", "🏁"),
     ]
 
+    _stage_disabled = (_queue_view is not None) and (not has_slot)
+    if _stage_disabled:
+        st.caption(":orange[Claim the slot above to enable stage buttons.]")
     stage_cols = st.columns(len(stages_list))
     for i, (stage_key, stage_name, stage_icon) in enumerate(stages_list):
         with stage_cols[i]:
             if st.button(f"{stage_icon} {stage_name}", key=f"run_{stage_key}",
-                         use_container_width=True):
+                         use_container_width=True, disabled=_stage_disabled):
                 try:
                     from ip_agent.flow_manager import FlowManager
                     fm = FlowManager(flow_design, flow_pdk)
@@ -1129,7 +1309,8 @@ with tab_flow:
             label_visibility="collapsed",
         )
     with btn_col:
-        tcl_run = st.button("Execute", key="run_tcl", use_container_width=True)
+        tcl_run = st.button("Execute", key="run_tcl", use_container_width=True,
+                            disabled=not runner_running)
 
     if tcl_run and tcl_cmd:
         st.session_state.selected_tcl_cmd = ""
@@ -1206,7 +1387,13 @@ with tab_flow:
                         st.code("\n".join(display_lines), language="bash")
 
                     if status == "pending":
-                        st.info("Job queued — waiting for OpenROAD container to pick it up...")
+                        wait_since = info.get("submitted_at", "")
+                        if runner_status == "stopped":
+                            st.warning("⚠️ Runner is stopped — click **▶ Start Runner** above to process this job.")
+                        elif runner_status == "starting":
+                            st.info("⏳ Runner is starting, job will be picked up shortly…")
+                        else:
+                            st.info("Job queued — waiting for OpenROAD container to pick it up...")
                         needs_rerun = True
 
                     if status in ("complete", "failed"):
@@ -1356,3 +1543,6 @@ with tab_flow:
             "No jobs yet. Click a stage button above to run an OpenROAD stage, "
             "or use 'Run Full Flow' to execute the complete P&R flow."
         )
+
+with tab_learn:
+    render_lessons_tab()

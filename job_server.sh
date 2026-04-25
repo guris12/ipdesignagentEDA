@@ -17,6 +17,12 @@ FLOW_HOME="/OpenROAD-flow-scripts/flow"
 
 mkdir -p "$JOBS_DIR" "$RESULTS_DIR"
 
+# Start the X + noVNC stack so the OpenROAD GUI can render into a browser.
+# Safe to call even when the image lacks the GUI tools — the script returns early.
+if [ -x /start_gui_stack.sh ]; then
+    /start_gui_stack.sh || echo "[job_server] GUI stack failed to start (continuing headless)"
+fi
+
 echo "=== OpenROAD Job Server started $(date -u) ==="
 echo "=== Watching $JOBS_DIR for new jobs ==="
 
@@ -107,6 +113,48 @@ process_job() {
                     echo "$command"
                     echo "exit"
                 } | openroad -no_init 2>&1 | tee -a "$result_dir/output.log" || exit_code=$?
+            fi
+            ;;
+
+        "gui_session")
+            local design pdk ttl
+            design=$(python3 -c "import json; print(json.load(open('$job_file'))['design'])")
+            pdk=$(python3 -c "import json; print(json.load(open('$job_file'))['pdk'])")
+            ttl=$(python3 -c "import json; print(json.load(open('$job_file')).get('ttl_seconds', 1200))")
+
+            # Kill any previous GUI session; only one slot active at a time on the shared runner.
+            pkill -f "openroad -gui" 2>/dev/null || true
+            sleep 1
+
+            local latest_odb liberty_file sdc_file
+            latest_odb=$(ls -t "results/${pdk}/${design}/base/"*.odb 2>/dev/null | head -1)
+            liberty_file=$(find "platforms/${pdk}/lib" -name "*.lib" -type f 2>/dev/null | head -1)
+            sdc_file=$(ls -t "results/${pdk}/${design}/base/"*.sdc 2>/dev/null | head -1)
+
+            if [[ -z "$latest_odb" ]]; then
+                echo "=== No .odb found for ${design}/${pdk}; run at least one stage first ===" | tee "$result_dir/output.log"
+                exit_code=1
+            else
+                local init_tcl="$result_dir/gui_init.tcl"
+                {
+                    [[ -n "$liberty_file" ]] && echo "read_liberty $liberty_file"
+                    echo "read_db $latest_odb"
+                    [[ -n "$sdc_file" ]] && echo "read_sdc $sdc_file"
+                    echo "gui::show"
+                } > "$init_tcl"
+
+                echo "=== Launching openroad -gui on DISPLAY=${DISPLAY:-:1}, ttl=${ttl}s ===" | tee "$result_dir/output.log"
+                DISPLAY="${DISPLAY:-:1}" timeout "${ttl}" openroad -gui "$init_tcl" \
+                    >>"$result_dir/output.log" 2>&1 &
+                local gui_pid=$!
+                echo "$gui_pid" > "$result_dir/gui.pid"
+                # Return control immediately; the GUI runs in background until ttl or explicit kill.
+                # Mark this job "complete" once the GUI has been started — the container stays
+                # listening and the student's browser session owns the noVNC stream.
+                sleep 1
+                if ! kill -0 "$gui_pid" 2>/dev/null; then
+                    exit_code=1
+                fi
             fi
             ;;
 

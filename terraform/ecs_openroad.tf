@@ -70,8 +70,8 @@ resource "aws_ecs_task_definition" "openroad" {
     name = "shared-data"
 
     efs_volume_configuration {
-      file_system_id          = aws_efs_file_system.shared.id
-      transit_encryption      = "ENABLED"
+      file_system_id     = aws_efs_file_system.shared.id
+      transit_encryption = "ENABLED"
       authorization_config {
         access_point_id = aws_efs_access_point.shared.id
         iam             = "ENABLED"
@@ -89,6 +89,14 @@ resource "aws_ecs_task_definition" "openroad" {
           sourceVolume  = "shared-data"
           containerPath = "/shared"
           readOnly      = false
+        }
+      ]
+
+      portMappings = [
+        {
+          containerPort = 6080
+          hostPort      = 6080
+          protocol      = "tcp"
         }
       ]
 
@@ -159,10 +167,17 @@ resource "aws_ecs_service" "openroad" {
     assign_public_ip = true
   }
 
+  load_balancer {
+    target_group_arn = aws_lb_target_group.openroad_gui.arn
+    container_name   = "${var.project_name}-openroad"
+    container_port   = 6080
+  }
+
   force_new_deployment = true
 
   depends_on = [
     aws_efs_mount_target.shared,
+    aws_lb_listener_rule.gui_host,
   ]
 
   tags = {

@@ -1,16 +1,44 @@
 FROM openroad/orfs:latest
 
+# ---------------------------------------------------------------------------
+# X11 + VNC + noVNC stack for in-browser OpenROAD GUI.
+# gui.viongen.in → ALB → port 6080 (noVNC) → x11vnc :1 → Xvfb :1 → openroad -gui
+# ---------------------------------------------------------------------------
+USER root
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        xvfb \
+        x11vnc \
+        fluxbox \
+        novnc \
+        websockify \
+        xterm \
+        xauth \
+        x11-utils \
+        libxrender1 \
+        libxi6 \
+        libxkbcommon-x11-0 \
+        libgl1 \
+        net-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Provide /usr/bin/novnc_proxy compatibility shim; actual entry is websockify+novnc
+ENV DISPLAY=:1
+ENV VNC_PORT=5901
+ENV NOVNC_PORT=6080
+ENV RESOLUTION=1680x1050x24
+
 WORKDIR /OpenROAD-flow-scripts/flow
 
-# Shared volume mount point for agent <-> OpenROAD communication
 VOLUME /shared
 
-# Pre-validate that gcd design config exists
 RUN test -f designs/sky130hd/gcd/config.mk
 
 COPY run_flow.sh /run_flow.sh
 COPY job_server.sh /job_server.sh
-RUN chmod +x /run_flow.sh /job_server.sh
+COPY start_gui_stack.sh /start_gui_stack.sh
+RUN chmod +x /run_flow.sh /job_server.sh /start_gui_stack.sh
+
+EXPOSE 6080
 
 ENTRYPOINT ["/job_server.sh"]
 CMD ["--watch-only"]

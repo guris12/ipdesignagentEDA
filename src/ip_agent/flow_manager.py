@@ -121,6 +121,23 @@ class FlowManager:
             "pdk": self.pdk,
         })
 
+    def submit_gui_session(self, ttl_seconds: int = 1200) -> str:
+        """Launch ``openroad -gui`` on the shared runner and stream it via noVNC.
+
+        The job server kills any prior GUI session before starting a new one,
+        so only one student can be live at a time. The caller is expected to
+        gate access via the queue manager (Phase 4).
+        """
+        self._validate_design_pdk()
+        if ttl_seconds <= 0 or ttl_seconds > 7200:
+            raise ValueError("ttl_seconds must be between 1 and 7200")
+        return self._write_job({
+            "type": "gui_session",
+            "design": self.design,
+            "pdk": self.pdk,
+            "ttl_seconds": int(ttl_seconds),
+        })
+
     def get_status(self, job_id: str) -> JobStatus:
         result_dir = self._results_dir / job_id
         if (result_dir / ".complete").exists():
@@ -258,3 +275,53 @@ class FlowManager:
                     f"Command '{first_word}' not in whitelist. "
                     f"Allowed: {sorted(ALLOWED_TCL_COMMANDS)}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# ECS runner control (AWS-only — gracefully degrades locally)
+# ---------------------------------------------------------------------------
+
+ECS_CLUSTER = "ip-design-agent-cluster"
+ECS_OPENROAD_SERVICE = "ip-design-agent-openroad"
+ECS_REGION = "eu-west-1"
+
+
+def check_runner_status() -> str:
+    """Return 'running', 'starting', 'stopped', or 'unknown'."""
+    try:
+        import boto3
+        ecs = boto3.client("ecs", region_name=ECS_REGION)
+        resp = ecs.describe_services(cluster=ECS_CLUSTER, services=[ECS_OPENROAD_SERVICE])
+        services = resp.get("services", [])
+        if not services:
+            return "unknown"
+        svc = services[0]
+        if svc.get("desiredCount", 0) == 0:
+            return "stopped"
+        if svc.get("runningCount", 0) > 0:
+            return "running"
+        return "starting"
+    except Exception:
+        return "unknown"
+
+
+def start_runner() -> bool:
+    """Scale OpenROAD ECS service to desiredCount=1. Returns True on success."""
+    try:
+        import boto3
+        ecs = boto3.client("ecs", region_name=ECS_REGION)
+        ecs.update_service(cluster=ECS_CLUSTER, service=ECS_OPENROAD_SERVICE, desiredCount=1)
+        return True
+    except Exception:
+        return False
+
+
+def stop_runner() -> bool:
+    """Scale OpenROAD ECS service to desiredCount=0. Returns True on success."""
+    try:
+        import boto3
+        ecs = boto3.client("ecs", region_name=ECS_REGION)
+        ecs.update_service(cluster=ECS_CLUSTER, service=ECS_OPENROAD_SERVICE, desiredCount=0)
+        return True
+    except Exception:
+        return False

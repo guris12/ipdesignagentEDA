@@ -45,6 +45,12 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
     logger.info("IP Design Agent API starting up...")
+    try:
+        from ip_agent import queue_manager
+        queue_manager.ensure_table()
+        logger.info("queue_slots table ready")
+    except Exception as exc:
+        logger.warning("queue_slots init skipped: %s", exc)
     yield
     logger.info("IP Design Agent API shutting down...")
 
@@ -536,6 +542,342 @@ async def list_flow_jobs(limit: int = 20):
     from ip_agent.flow_manager import FlowManager
     fm = FlowManager()
     return {"jobs": fm.list_jobs(limit)}
+
+
+@app.get("/flow/runner/status")
+async def runner_status():
+    """Return OpenROAD ECS runner status: running, starting, stopped, or unknown."""
+    from ip_agent.flow_manager import check_runner_status
+    return {"status": check_runner_status()}
+
+
+@app.post("/flow/runner/start")
+async def runner_start():
+    """Scale OpenROAD ECS service to desiredCount=1."""
+    from ip_agent.flow_manager import start_runner
+    ok = start_runner()
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to start runner (no ECS access or not on AWS)")
+    return {"started": True}
+
+
+@app.post("/flow/runner/stop")
+async def runner_stop():
+    """Scale OpenROAD ECS service to desiredCount=0."""
+    from ip_agent.flow_manager import stop_runner
+    ok = stop_runner()
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to stop runner (no ECS access or not on AWS)")
+    return {"stopped": True}
+
+
+# ---------------------------------------------------------------------------
+# Queue — time-slot access to the shared OpenROAD runner
+# ---------------------------------------------------------------------------
+
+
+class _QueueIdBody(BaseModel):
+    identifier: str = Field(..., min_length=1, max_length=128,
+                            description="Anonymous UUID or email of the student")
+
+
+@app.post("/queue/claim")
+async def queue_claim(body: _QueueIdBody):
+    """Take the runner slot if free, otherwise join the queue."""
+    try:
+        from ip_agent import queue_manager
+        slot = queue_manager.claim_slot(body.identifier)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"queue error: {exc}") from exc
+    return slot.to_json()
+
+
+@app.post("/queue/release")
+async def queue_release(body: _QueueIdBody):
+    """Leave the queue or end the active slot early."""
+    try:
+        from ip_agent import queue_manager
+        removed = queue_manager.release_slot(body.identifier)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"queue error: {exc}") from exc
+    return {"removed": removed}
+
+
+@app.get("/queue/state/{identifier}")
+async def queue_state(identifier: str):
+    """Return queue view for one student: status, position, ETA, seconds_remaining."""
+    if not identifier or len(identifier) > 128:
+        raise HTTPException(status_code=400, detail="Invalid identifier")
+    try:
+        from ip_agent import queue_manager
+        view = queue_manager.state_for(identifier)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"queue error: {exc}") from exc
+    return view.to_json()
+
+
+@app.post("/queue/cleanup")
+async def queue_cleanup():
+    """Force expire-and-promote cycle. Usually called by a background task."""
+    try:
+        from ip_agent import queue_manager
+        removed = queue_manager.cleanup_expired()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"queue error: {exc}") from exc
+    return {"expired": removed}
+
+
+@app.get("/flow/terminal", response_class=HTMLResponse)
+async def flow_terminal(design: str = "gcd", pdk: str = "sky130hd"):
+    """
+    Browser-based interactive terminal for OpenROAD Tcl commands.
+
+    Renders an xterm.js terminal. Commands are submitted via /flow/run-tcl
+    and results are polled from /flow/status/{job_id} + /flow/logs/{job_id}.
+    """
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenROAD Terminal — {design} / {pdk}</title>
+<link rel="stylesheet"
+  href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: #0d1117; font-family: monospace; height: 100vh; display: flex; flex-direction: column; }}
+  #header {{
+    background: #161b22; border-bottom: 1px solid #30363d;
+    padding: 10px 16px; display: flex; align-items: center; gap: 12px;
+  }}
+  #header h2 {{ color: #e6edf3; font-size: 14px; font-weight: 600; }}
+  #header .chip {{
+    background: #1f2937; color: #8b949e; border: 1px solid #30363d;
+    border-radius: 12px; padding: 3px 10px; font-size: 12px;
+  }}
+  #status-chip {{
+    border-radius: 12px; padding: 3px 10px; font-size: 12px; border: 1px solid transparent;
+  }}
+  #terminal-wrap {{ flex: 1; padding: 8px; overflow: hidden; }}
+  #terminal {{ height: 100%; }}
+</style>
+</head>
+<body>
+<div id="header">
+  <h2>OpenROAD Terminal</h2>
+  <span class="chip">{design}</span>
+  <span class="chip">{pdk}</span>
+  <span id="status-chip" style="background:#1f2937;color:#8b949e;border-color:#30363d;">
+    checking...
+  </span>
+  <span style="color:#8b949e;font-size:11px;margin-left:auto">
+    Allowed: report_checks, report_timing, size_cell, insert_buffer, ...
+  </span>
+</div>
+<div id="terminal-wrap">
+  <div id="terminal"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+<script>
+const DESIGN = "{design}";
+const PDK = "{pdk}";
+const BASE = window.location.origin;
+
+const term = new Terminal({{
+  theme: {{
+    background: '#0d1117', foreground: '#e6edf3',
+    cursor: '#58a6ff', selection: 'rgba(88,166,255,0.3)',
+    green: '#3fb950', red: '#f85149', yellow: '#d29922',
+    cyan: '#39c5cf',
+  }},
+  fontFamily: "'Cascadia Code', 'Fira Code', 'Courier New', monospace",
+  fontSize: 13,
+  lineHeight: 1.4,
+  cursorBlink: true,
+  allowTransparency: true,
+}});
+
+const fitAddon = new FitAddon.FitAddon();
+term.loadAddon(fitAddon);
+term.open(document.getElementById('terminal'));
+fitAddon.fit();
+window.addEventListener('resize', () => fitAddon.fit());
+
+let inputBuffer = '';
+let history = [];
+let histIdx = -1;
+let busy = false;
+
+const PROMPT = '\\x1b[36mopenroad\\x1b[0m\\x1b[90m>\\x1b[0m ';
+
+function writePrompt() {{
+  term.write('\\r\\n' + PROMPT);
+  inputBuffer = '';
+}}
+
+function setStatus(text, color) {{
+  const chip = document.getElementById('status-chip');
+  chip.textContent = text;
+  chip.style.color = color;
+  chip.style.borderColor = color + '44';
+  chip.style.background = color + '11';
+}}
+
+async function checkRunnerStatus() {{
+  try {{
+    const r = await fetch(BASE + '/flow/runner/status');
+    const d = await r.json();
+    if (d.status === 'running') setStatus('🟢 Runner running', '#3fb950');
+    else if (d.status === 'starting') setStatus('🟡 Runner starting', '#d29922');
+    else if (d.status === 'stopped') setStatus('🔴 Runner stopped', '#f85149');
+    else setStatus('⚪ Status unknown', '#8b949e');
+  }} catch (e) {{
+    setStatus('⚪ Status unknown', '#8b949e');
+  }}
+}}
+
+async function runCommand(cmd) {{
+  if (!cmd.trim()) {{ writePrompt(); return; }}
+  busy = true;
+  history.unshift(cmd);
+  histIdx = -1;
+
+  term.write('\\x1b[90m  → submitting...\\x1b[0m');
+
+  let job_id;
+  try {{
+    const r = await fetch(BASE + '/flow/run-tcl', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ design: DESIGN, pdk: PDK, command: cmd }}),
+    }});
+    if (!r.ok) {{
+      const err = await r.json();
+      term.write('\\r\\n\\x1b[31mError: ' + (err.detail || 'request failed') + '\\x1b[0m');
+      writePrompt(); busy = false; return;
+    }}
+    const d = await r.json();
+    job_id = d.job_id;
+  }} catch (e) {{
+    term.write('\\r\\n\\x1b[31mNetwork error: ' + e.message + '\\x1b[0m');
+    writePrompt(); busy = false; return;
+  }}
+
+  // Poll for completion
+  let offset = 0;
+  let dots = 0;
+  term.write('\\r\\x1b[2K\\x1b[90m  ⏳ waiting for runner');
+  const poll = setInterval(async () => {{
+    try {{
+      const lr = await fetch(BASE + '/flow/logs/' + job_id + '?offset=' + offset);
+      const ld = await lr.json();
+
+      if (ld.log) {{
+        if (dots === 0) term.write('\\r\\x1b[2K');
+        ld.log.split('\\n').forEach(line => {{
+          if (line) term.write('\\r\\n  ' + line.replace(/\\x1b/g, '\\x1b'));
+        }});
+        offset = ld.offset;
+        dots = 0;
+      }} else {{
+        dots++;
+        term.write('.');
+      }}
+
+      if (ld.status === 'complete') {{
+        clearInterval(poll);
+        term.write('\\r\\n\\x1b[32m  ✓ done\\x1b[0m');
+        writePrompt(); busy = false;
+      }} else if (ld.status === 'failed') {{
+        clearInterval(poll);
+        term.write('\\r\\n\\x1b[31m  ✗ failed\\x1b[0m');
+        writePrompt(); busy = false;
+      }}
+    }} catch (e) {{
+      dots++;
+      term.write('.');
+    }}
+  }}, 600);
+
+  // Safety timeout 5 minutes
+  setTimeout(() => {{
+    clearInterval(poll);
+    if (busy) {{ term.write('\\r\\n\\x1b[33m  timeout\\x1b[0m'); writePrompt(); busy = false; }}
+  }}, 300000);
+}}
+
+term.onKey(e => {{
+  const {{ key, domEvent }} = e;
+  const code = domEvent.keyCode;
+
+  if (busy) return;
+
+  if (code === 13) {{ // Enter
+    term.write('\\r\\n');
+    runCommand(inputBuffer.trim());
+  }} else if (code === 8) {{ // Backspace
+    if (inputBuffer.length > 0) {{
+      inputBuffer = inputBuffer.slice(0, -1);
+      term.write('\\b \\b');
+    }}
+  }} else if (code === 38) {{ // Up arrow
+    if (history.length > 0) {{
+      histIdx = Math.min(histIdx + 1, history.length - 1);
+      const h = history[histIdx];
+      term.write('\\r' + PROMPT + h + ' '.repeat(Math.max(0, inputBuffer.length - h.length)));
+      term.write('\\r' + PROMPT + h);
+      inputBuffer = h;
+    }}
+  }} else if (code === 40) {{ // Down arrow
+    histIdx = Math.max(histIdx - 1, -1);
+    const h = histIdx >= 0 ? history[histIdx] : '';
+    term.write('\\r' + PROMPT + h + ' '.repeat(Math.max(0, inputBuffer.length - h.length)));
+    term.write('\\r' + PROMPT + h);
+    inputBuffer = h;
+  }} else if (code === 67 && domEvent.ctrlKey) {{ // Ctrl+C
+    inputBuffer = '';
+    term.write('^C');
+    writePrompt();
+  }} else if (key.length === 1) {{
+    inputBuffer += key;
+    term.write(key);
+  }}
+}});
+
+// Startup banner
+term.write('\\x1b[1;36m  OpenROAD Interactive Terminal\\x1b[0m\\r\\n');
+term.write('\\x1b[90m  Design: {design}  PDK: {pdk}\\x1b[0m\\r\\n');
+term.write('\\x1b[90m  Commands are executed in the OpenROAD container via the job queue.\\x1b[0m\\r\\n');
+term.write('\\x1b[90m  Type a command and press Enter. Use ↑/↓ for history.\\x1b[0m\\r\\n');
+writePrompt();
+
+checkRunnerStatus();
+setInterval(checkRunnerStatus, 10000);
+</script>
+</body>
+</html>"""
+    return HTMLResponse(html)
+
+
+@app.get("/flow/dashboard/{design}/{pdk}", response_class=HTMLResponse)
+async def flow_progress_dashboard(design: str, pdk: str):
+    """
+    Flow progress dashboard — per-stage stats sheet.
+
+    Shows all 6 stages (Synth→Floorplan→Place→CTS→Route→Finish) with status,
+    runtime, WNS, DRC, area. Auto-refreshes every 10s.
+    """
+    try:
+        from ip_agent.flow_dashboard import generate_flow_dashboard
+        from ip_agent.config import SHARED_DATA_PATH
+        shared_dir = Path(SHARED_DATA_PATH)
+        html = generate_flow_dashboard(design, pdk, shared_dir)
+        return HTMLResponse(html)
+    except Exception as e:
+        logger.error(f"Flow dashboard failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/flow/report/{job_id}", response_class=HTMLResponse)
